@@ -227,7 +227,7 @@ function peerLabel(message: Message): HTMLElement {
 	return h(
 		"span",
 		{},
-		message.peerLabel ?? (message.peerStatus === "allowed" ? "Allowed sender" : "Unknown agent"),
+		message.peerLabel ?? (message.peerStatus === "allowed" ? (message.direction === "out" ? "Allowed recipient" : "Allowed sender") : "Unknown agent"),
 		" ",
 		message.peerVerified ? h("span", { class: "chip ok" }, "verified") : h("span", { class: "chip" }, "unverified"),
 	);

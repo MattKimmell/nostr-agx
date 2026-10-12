@@ -1,4 +1,5 @@
 import type { IncomingMessage } from "node:http";
+import { basename, dirname } from "node:path";
 import {
 	archiveDraft,
 	type Draft,
@@ -55,6 +56,8 @@ export interface ApiDeps {
 	draftsDir: string | null;
 	/** The `--compose` draft, if any. */
 	composeDraft: Draft | null;
+	/** The file `--compose` loaded `composeDraft` from; moved to `sent/` after that exact message is sent. */
+	composeFile?: string | null;
 	/** Publish a plain message through the same path as `agx send`. */
 	send: (message: SendRequest) => Promise<{ ok: boolean; detail: string | null; eventId?: string | null; contextId?: string | null }>;
 	/** Public Elladex lookup by handle or address. */
@@ -349,14 +352,37 @@ async function handleSend(deps: ApiDeps, body: unknown): Promise<ApiResult> {
 		deliveryStatus: "sent",
 	});
 	const draftName = str(body.draft, 200);
-	if (draftName && deps.draftsDir) {
-		try {
+	try {
+		if (draftName && deps.draftsDir) {
 			archiveDraft(deps.draftsDir, draftName);
-		} catch {
-			// The message is sent; a draft that can't be moved is only left behind.
+		} else if (!draftName && deps.composeFile && deps.composeDraft && sameMessage(deps, { to, subject, contextId, text })) {
+			archiveDraft(dirname(deps.composeFile), basename(deps.composeFile));
 		}
+	} catch {
+		// The message is sent; a draft that can't be moved is only left behind.
 	}
 	return { status: 200, body: { ok: true, message: stored } };
+}
+
+/** Whether what was sent is exactly the draft `--compose` loaded. */
+function sameMessage(
+	deps: ApiDeps,
+	sent: { to: string; subject: string | null | undefined; contextId: string | null | undefined; text: string },
+): boolean {
+	const draft = deps.composeDraft;
+	if (!draft) {
+		return false;
+	}
+	try {
+		return (
+			deps.toNpub(draft.to) === sent.to &&
+			draft.body === sent.text &&
+			(draft.subject ?? null) === (sent.subject ?? null) &&
+			(draft.contextId ?? null) === (sent.contextId ?? null)
+		);
+	} catch {
+		return false;
+	}
 }
 
 function withPeer<T extends { peer: string }>(message: T, peers: PeerRecord[]): T & { peerStatus: PeerStatus | null; peerLabel: string | null; peerVerified: boolean } {

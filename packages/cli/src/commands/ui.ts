@@ -144,6 +144,7 @@ export async function uiCommand(options: UiOptions): Promise<void> {
 			store,
 			draftsDir,
 			composeDraft,
+			composeFile: composeDraft && options.compose ? resolve(options.compose) : null,
 			toNpub: (input) => toDisplayNpub(toHexPubkey(input.trim(), "recipient")),
 			identity: () => ({
 				profile: profileName,
