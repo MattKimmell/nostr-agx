@@ -308,7 +308,11 @@ async function pollWithLock(
 			{
 				once,
 				rerun,
-				persist: (next) => savePendingLogin(profileName, next),
+				// Every poll rewrites this file (lastPolledAt), so skip the
+				// fsync: a power loss can at worst lose the pending code, and
+				// the next run asks for a fresh one.
+				persist: (next) =>
+					savePendingLogin(profileName, next, { sync: false }),
 				recover: () => finishedElsewhere(profileName, base, fresh) !== null,
 				heartbeat: (nextGapMs) => {
 					held.heartbeat(nextGapMs);

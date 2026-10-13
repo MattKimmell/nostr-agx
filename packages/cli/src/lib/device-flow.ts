@@ -13,6 +13,7 @@ import { userAgent } from "./api.js";
 import { AgxCliError, authError, EXIT, networkError } from "./errors.js";
 import {
 	ensureDir,
+	type PrivateWriteOptions,
 	pendingLoginPath,
 	removePrivateFile,
 	writePrivateJson,
@@ -650,8 +651,12 @@ export function loadPendingLogin(profile: string): PendingLogin | null {
 	}
 }
 
-export function savePendingLogin(profile: string, pending: PendingLogin): void {
-	writePrivateJson(pendingLoginPath(profile), pending);
+export function savePendingLogin(
+	profile: string,
+	pending: PendingLogin,
+	options?: PrivateWriteOptions,
+): void {
+	writePrivateJson(pendingLoginPath(profile), pending, options);
 }
 
 export function removePendingLogin(profile: string): boolean {
@@ -836,7 +841,9 @@ export function tryAcquireLock(path: string, nextGapMs = 0): PollLock | null {
 					if (released || !ownsLock(path, token)) {
 						return false;
 					}
-					writePrivateJson(path, lockRecord(token, gapMs));
+					// Refreshed on every poll, so it skips the fsync: after a power
+					// loss the holder is gone too, and the lock is abandoned anyway.
+					writePrivateJson(path, lockRecord(token, gapMs), { sync: false });
 					return true;
 				},
 				release() {

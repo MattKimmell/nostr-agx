@@ -86,8 +86,21 @@ export function ensureDir(dir: string): void {
 }
 
 /** Atomic, private write. Used for every file under `~/.agx`. */
-export function writePrivateJson(path: string, value: unknown): void {
-	writePrivateText(path, `${JSON.stringify(value, null, 2)}\n`);
+export function writePrivateJson(
+	path: string,
+	value: unknown,
+	options?: PrivateWriteOptions,
+): void {
+	writePrivateText(path, `${JSON.stringify(value, null, 2)}\n`, options);
+}
+
+export interface PrivateWriteOptions {
+	/**
+	 * Flush to disk before the rename (default true). Only a file that means
+	 * nothing after a power loss, such as a lock heartbeat whose holder died
+	 * with the machine, turns this off.
+	 */
+	sync?: boolean;
 }
 
 /**
@@ -97,18 +110,24 @@ export function writePrivateJson(path: string, value: unknown): void {
  * (two `agx login` runs finishing together) never share, and tear, one temp
  * file. A failed write removes its temp file rather than leaving it behind.
  */
-export function writePrivateText(path: string, text: string): void {
+export function writePrivateText(
+	path: string,
+	text: string,
+	{ sync = true }: PrivateWriteOptions = {},
+): void {
 	ensureDir(dirname(path));
 	const tmp = `${path}.${process.pid}.${randomBytes(4).toString("hex")}.tmp`;
 	try {
 		writeFileSync(tmp, text, { mode: 0o600 });
 		chmodSync(tmp, 0o600);
 		// On disk before the rename, so a power loss never leaves an empty file where data was.
-		const fd = openSync(tmp, "r");
-		try {
-			fsyncSync(fd);
-		} finally {
-			closeSync(fd);
+		if (sync) {
+			const fd = openSync(tmp, "r");
+			try {
+				fsyncSync(fd);
+			} finally {
+				closeSync(fd);
+			}
 		}
 		renameSync(tmp, path);
 	} catch (error) {
