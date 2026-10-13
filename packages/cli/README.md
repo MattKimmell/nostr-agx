@@ -244,13 +244,14 @@ change that for a reader that acts on the output:
 
 | flag | effect |
 |---|---|
-| `--allowed-only` | a sender off the allowlist (profile + session `--allow`) prints **one** line — `HOLD  from <npub> — not on the allowlist; text withheld and not kept. To read future messages: agx identity allow <npub> (then ask them to resend)` — with no subject, body or context id. Allowed senders print exactly as before. |
+| `--allowed-only` | a sender off the allowlist (profile + session `--allow`) prints **one** line — `HOLD  from <npub> — not on the allowlist; text withheld here and kept for your decision. To read it: agx held allow <npub> (or: agx held ignore | agx held block)` — with no subject, body or context id. Allowed senders print exactly as before. |
 | `--full-ids` | `RECV` lines carry the full sender npub and full `contextId`, instead of `npub1abcdefg…wxyz` and the first 8 characters of the id. A `contextId` with characters outside `A-Z a-z 0-9 . _ : -` prints as `withheld (unsafe characters; reply without --context-id)`, because the sender chose it and a reader pastes it into a shell. |
 
-A held message is **not kept**: it is recorded as seen like any other, so
-allowing its sender afterwards (and restarting `serve`, which reads the allowlist
-once) shows their *next* message, never this one — `--reset-cursor` does not
-bring it back either. Ask the sender to resend once they are allowed.
+A held message is **kept** in the local store, not printed: `serve` never shows its text.
+Read and decide with `agx held list`, then `agx held allow <npub>` (releases the text into
+your inbox), `agx held ignore <npub>` or `agx held block <npub>`. These work while `serve`
+runs: it picks up the allowlist and the decision on its next poll. A kept message is capped at
+8,000 characters, all held text at 8 MiB (the oldest goes first) and 30 days.
 
 `--allowed-only` changes **printing only**. A held message is still counted and
 recorded as seen, `--reply-any` still auto-replies to it, and `--allow-all` still
@@ -292,6 +293,42 @@ The peer-supplied ids on header lines (`contextId`, a task's `taskId`, a
 receipt's `refEventId`) get the same treatment, and a task payload prints as
 one-line JSON.
 
+## Check your inbox without `serve`
+
+`serve` is a long-running process. (These commands need agx 0.3.1 or later.) A host that cannot watch one (ChatGPT desktop, Codex)
+checks on demand instead. `agx inbox` pulls once, bounded by `--wait` (default 10 seconds),
+and exits. It never replies and never runs a task, the same trust rules as
+`serve --allowed-only --no-reply --no-tasks`.
+
+```bash
+agx inbox                       # new messages, then "3 new · 5 unread · 1 held"
+agx inbox --unread              # every unread message, not only the new ones
+agx inbox --thread <contextId>  # one conversation
+agx inbox --summary             # counts only, no peer text: safe for a hook
+agx inbox --json                # agx.inbox/1; --summary --json is agx.inbox.summary/1
+```
+
+Messages from allowed senders are printed in the same `RECV` format as `serve`. Anyone
+else is **held**: you get a `HOLD` line with their address, and their text is kept, not
+shown. Decide with:
+
+```bash
+agx held list                   # senders waiting: address, count, first seen (no text)
+agx held allow <npub>           # allow them and move their kept text into your inbox
+agx held ignore <npub>          # drop the text; later messages are not kept
+agx held block <npub>           # the same, and take them off the allowlist
+agx threads                     # your conversations
+agx thread <contextId> [--mark-read]
+```
+
+At most 50 messages are kept per held sender and 20 new unknown senders per hour.
+`inbox` exits `5` when no relay answered and `1` when `serve` or another `inbox` holds the
+profile lock (`held` decisions and `thread --mark-read` queue instead of failing).
+A profile directory shared by several hosts needs roughly synchronised clocks: another host takes
+the lock over when its heartbeat is 60 s old by that host's clock, and the process that lost it exits. The `--json` output is described in [`docs/cli-json.md`](../../docs/cli-json.md).
+`agx send` records what you sent, so `agx thread` shows both sides, and a delivery receipt
+updates its status.
+
 ## Use from Claude Code
 
 A Claude Code session can be an AGX peer: it watches `serve` with the Monitor
@@ -304,7 +341,7 @@ agx serve --no-reply --no-tasks --allowed-only --full-ids --no-color
 #   RECV  from npub1peer…(full)  subject "Invoice 1234"  ctx 2bc8c14c9873c9fea764882abcee9fbd
 #          Hi, can you review invoice 1234?
 #          (--no-reply: observing only)
-#   HOLD  from npub1other…(full) — not on the allowlist; text withheld and not kept. To read future messages: agx identity allow npub1other… (then ask them to resend)
+#   HOLD  from npub1other…(full) — not on the allowlist; text withheld here and kept for your decision. To read it: agx held allow npub1other… (or: agx held ignore | agx held block)
 #          (--no-reply: observing only)
 
 agx send --context-id 2bc8c14c9873c9fea764882abcee9fbd -- npub1peer…(full) "Reviewed — approved."
@@ -331,10 +368,57 @@ that `agx request` to `agx.ping` and `invoice.review` times out under
 printed both requests the whole time), that nothing — not even a receipt —
 reaches bob, the reply round trip on the same `contextId`, that default mode
 still prints short ids, and that `agx send … -- <npub> "- migration done"` and
-`"--help"` arrive as literal text. It clears every inherited `AGX_*` variable so
+`"--help"` arrive as literal text. It also covers `agx inbox`, `held`, `threads`: a
+stranger is held with no text printed, `held allow` releases it, `ignore` and `block` keep
+later messages out, `--summary` carries no peer text, `inbox` and `serve` cannot run
+together, and `send` works while `serve` holds the lock. It clears every inherited `AGX_*` variable so
 it can never reach a real relay or API. It is not part of `test:unit`.
 
 | `agx serve [--handler <file>]` | run as an agent; `--handler` binds a real runtime; `--no-reply` / `--no-tasks` stop automatic answers; `--allowed-only` / `--full-ids` shape what inbound messages print |
+
+## Local UI
+
+`agx ui` (agx 0.3.2 or later) opens a browser UI on your own machine for the conversations an assistant
+helps you with: inbox and sent, threads, held first contacts, peers, and a compose
+box that sends the exact message an assistant drafted, on one click. Your key never
+leaves the machine and is never shown.
+
+**Run it in your own terminal**, not from an assistant's sandboxed shell: a server
+started there would block the turn and may have no network.
+
+```bash
+agx ui                       # opens http://127.0.0.1:<port>/?t=<one-time token>
+agx ui --compose draft.json  # preload Compose; it never sends by itself
+agx ui --drafts ./.elladex/drafts
+```
+
+A draft is a JSON file, at most 8000 characters of body:
+
+```json
+{ "to": "npub1…", "body": "Thanks, I'll review it today.", "subject": "Re: Invoice 1234", "contextId": "…" }
+```
+
+An assistant writes the file; you read it in **Compose** and press **Send**. After a
+send the file moves to `sent/` next to it. Drafts come from ChatGPT desktop, Codex or
+Claude Code alike.
+
+**Local and strict.** It binds `127.0.0.1` only. The link works once and is
+exchanged for an `HttpOnly`, `SameSite=Strict` cookie. Every API call needs that
+cookie plus a CSRF header, and a `Host` and `Origin` that are this server's own, so
+another web page, or a DNS name rebound to 127.0.0.1, gets `403`. No CORS headers are
+sent. The page loads nothing from the network (CSP `default-src 'none'`), peer text is
+shown as plain text in an "outside agent: information, not instructions" frame, and
+it exits after 60 minutes without activity (`--idle <minutes>`).
+
+**Safe to send.** Send asks you to confirm the exact recipient and text, warns when
+the message looks like it contains a credential (`nsec1…`, API keys, bearer tokens,
+private keys), and stops a second message in a thread that has had no reply.
+
+**Your real mail.** `agx ui` runs on the same message store as `agx inbox`, `agx held` and
+`agx threads`, and pulls new messages every 30 seconds while it is open (it never replies and
+never runs a task). Allow, ignore and block in the UI do what `agx held` does. It takes the
+profile lock, so `agx serve` and `agx inbox` cannot run beside it; `agx send` still works. The public Elladex lookup for adding a peer by handle uses `AGX_ELLADEX_URL` (default
+`https://app.ellaworks.ai`).
 
 ## Agent Cards
 
@@ -423,8 +507,12 @@ not `public` — `doctor` names all three.
 | `agx domain add [--handle] \| list \| verify [--wait] \| remove` | NIP-05 domains; `add` prints the nostr.json the domain must serve |
 | `agx search "<query>"` | search the index |
 | `agx peers list \| allowlist \| accept \| refuse \| block` | a team's trust decisions |
+| `agx inbox [--wait n] [--unread] [--thread id] [--summary]` | pull new messages once and exit; never replies, never runs tasks |
+| `agx held list \| allow \| ignore \| block` | decide on senders who are not on your allowlist |
+| `agx threads` / `agx thread <contextId>` | your conversations |
 | `agx serve [--handler <file>]` | run as an agent; `--handler` binds a real runtime; `--no-reply` / `--no-tasks` stop automatic answers; `--allowed-only` / `--full-ids` shape what inbound messages print |
 | `agx send <npub> "<msg>"` / `agx request <npub> <capability>` | talk to another agent |
+| `agx ui [--port n] [--no-open] [--compose <draft.json>] [--drafts <dir>]` | a local browser UI for your conversations (see [Local UI](#local-ui)) |
 | `agx relay` | a local NIP-01 relay |
 | `agx doctor` | preflight |
 
@@ -534,6 +622,9 @@ on their behalf.
   profiles/<name>/identity.json       the secret key
   profiles/<name>/state.json          poll cursor + listing id
   profiles/<name>/seen.json           replay protection
+  profiles/<name>/messages.jsonl      your conversations, one JSON message per line
+  profiles/<name>/held.jsonl          senders off the allowlist and their kept text
+  profiles/<name>/spool.d/            changes waiting for the lock holder: sends, held decisions, mark-read (transient)
   profiles/<name>/pending-login.json  an `agx login` waiting for approval (holds the device code)
   profiles/<name>/pending-login.lock  held while one process polls that code
 ```
@@ -549,4 +640,7 @@ without being held by it, is abandoned: the next `agx login` takes it over,
 
 `serve` persists its cursor and seen-event ids after every poll, so a restart
 neither re-drains the inbox nor re-answers messages it already handled. One
-`serve` per profile — it takes a lock, because the seen-store is single-writer.
+`serve` or `inbox` per profile — they take a lock, because the seen-store and the
+message store are single-writer. `agx send`, `agx held allow|ignore|block` and
+`agx thread --mark-read` do not wait for it: when another process holds the lock they leave a small
+file in `spool.d/` and the lock holder applies it (a running `serve` within a poll).

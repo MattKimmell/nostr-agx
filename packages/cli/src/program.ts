@@ -46,8 +46,12 @@ import {
 import { registerCommand } from "./commands/register.js";
 import { relayCommand } from "./commands/relay.js";
 import { searchCommand } from "./commands/search.js";
+import { heldDecideCommand, heldListCommand } from "./commands/held.js";
+import { inboxCommand } from "./commands/inbox.js";
 import { requestCommand, sendCommand } from "./commands/send.js";
 import { serveCommand } from "./commands/serve.js";
+import { threadCommand, threadsCommand } from "./commands/threads.js";
+import { uiCommand } from "./commands/ui.js";
 import { whoamiCommand } from "./commands/whoami.js";
 import { AgxCliError, EXIT, HumanActionRequiredError } from "./lib/errors.js";
 import {
@@ -531,6 +535,49 @@ export function buildProgram(): Command {
 		.action((options) => serveCommand(withGlobals(options)));
 
 	program
+		.command("inbox")
+		.description("pull new messages once and exit: never replies, never runs tasks")
+		.option("--wait <seconds>", "bound the pull (default 10)")
+		.option("--unread", "list every unread message, not only the new ones")
+		.option("--thread <contextId>", "list one thread")
+		.option("--full-ids", "print full npubs and ids")
+		.option("--summary", "counts only, no peer text (safe for a hook)")
+		.option("-v, --verbose", "log transport activity")
+		.action((options) => inboxCommand(withGlobals(options)));
+
+	const held = program
+		.command("held")
+		.description("decide on senders who are not on your allowlist");
+	held
+		.command("list")
+		.description("list held senders: address, count, first seen (never their text)")
+		.option("--full-ids", "print full npubs")
+		.action((options) => heldListCommand(withGlobals(options)));
+	for (const [name, text] of [
+		["allow", "allow the sender and release their kept text into your inbox"],
+		["ignore", "drop the sender's kept text and keep later messages out"],
+		["block", "like ignore, and remove the sender from the allowlist"],
+	] as const) {
+		held
+			.command(`${name} <npub>`)
+			.description(text)
+			.action((npub: string, options) => heldDecideCommand(name, npub, withGlobals(options)));
+	}
+
+	program
+		.command("threads")
+		.description("list your conversations")
+		.option("--full-ids", "print full npubs")
+		.action((options) => threadsCommand(withGlobals(options)));
+
+	program
+		.command("thread <contextId>")
+		.description("show one conversation")
+		.option("--mark-read", "mark the shown messages as read")
+		.option("--full-ids", "print full npubs and ids")
+		.action((contextId: string, options) => threadCommand(contextId, withGlobals(options)));
+
+	program
 		.command("send <peer> <message>")
 		.description("send a plain message to another agent")
 		.option("--subject <text>")
@@ -546,6 +593,18 @@ export function buildProgram(): Command {
 		.action((peer, message, options) =>
 			sendCommand(peer, message, withGlobals(options)),
 		);
+
+	program
+		.command("ui")
+		.description("open a local browser UI for your conversations (run it in your own terminal)")
+		.option("--port <n>", "port to listen on, on 127.0.0.1 (default: a free one)")
+		.option("--no-open", "print the link instead of opening a browser")
+		.option("--compose <draft.json>", "load a draft {to, body, subject?, contextId?} into Compose; never sends by itself")
+		.option("--drafts <dir>", "list draft files from this folder (default: ./.elladex/drafts if it exists)")
+		.option("--idle <minutes>", "stop after this many minutes without activity (default 60, 0 disables)")
+		.addOption(new Option("--dev-store <file>", "sample JSON store for tests").hideHelp())
+		.option("-v, --verbose")
+		.action((options) => uiCommand(withGlobals(options)));
 
 	program
 		.command("request <peer> <capability>")

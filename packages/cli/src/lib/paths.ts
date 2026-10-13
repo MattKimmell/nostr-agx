@@ -1,7 +1,10 @@
 import { randomBytes } from "node:crypto";
 import {
 	chmodSync,
+	closeSync,
+	fsyncSync,
 	mkdirSync,
+	openSync,
 	renameSync,
 	rmSync,
 	statSync,
@@ -82,21 +85,31 @@ export function ensureDir(dir: string): void {
 	}
 }
 
+/** Atomic, private write. Used for every file under `~/.agx`. */
+export function writePrivateJson(path: string, value: unknown): void {
+	writePrivateText(path, `${JSON.stringify(value, null, 2)}\n`);
+}
+
 /**
- * Atomic, private write. Used for every file under `~/.agx`.
+ * Atomic, private write of text (JSON-lines files use this directly).
  *
  * The temp name is unique per write, so two processes writing the same file
  * (two `agx login` runs finishing together) never share, and tear, one temp
  * file. A failed write removes its temp file rather than leaving it behind.
  */
-export function writePrivateJson(path: string, value: unknown): void {
+export function writePrivateText(path: string, text: string): void {
 	ensureDir(dirname(path));
 	const tmp = `${path}.${process.pid}.${randomBytes(4).toString("hex")}.tmp`;
 	try {
-		writeFileSync(tmp, `${JSON.stringify(value, null, 2)}\n`, {
-			mode: 0o600,
-		});
+		writeFileSync(tmp, text, { mode: 0o600 });
 		chmodSync(tmp, 0o600);
+		// On disk before the rename, so a power loss never leaves an empty file where data was.
+		const fd = openSync(tmp, "r");
+		try {
+			fsyncSync(fd);
+		} finally {
+			closeSync(fd);
+		}
 		renameSync(tmp, path);
 	} catch (error) {
 		rmSync(tmp, { force: true });
