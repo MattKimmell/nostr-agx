@@ -323,6 +323,19 @@ describe("sending", () => {
 		const result = await client.call("POST", "/api/send", { to: ALICE, body, subject: "Hi", confirmedText: body, confirmedTo: ALICE });
 		expect(result.status).toBe(200);
 		expect(readdirSync(draftsDir)).toEqual(["sent"]);
+		const preset = await client.call("GET", "/api/compose");
+		expect(preset.body).toEqual({ draft: null });
+	});
+
+	it("matches a --compose draft with an empty subject against a null subject", async () => {
+		const file = join(draftsDir, "from-chatgpt.json");
+		const draft = { to: ALICE, body, subject: "" };
+		writeFileSync(file, JSON.stringify(draft));
+		api.composeDraft = draft;
+		api.composeFile = file;
+		const client = await connect();
+		await client.call("POST", "/api/send", { to: ALICE, body, subject: null, confirmedText: body, confirmedTo: ALICE });
+		expect(readdirSync(draftsDir)).toEqual(["sent"]);
 	});
 
 	it("leaves a --compose draft in place when what was sent is different", async () => {

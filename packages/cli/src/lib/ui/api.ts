@@ -356,6 +356,8 @@ async function handleSend(deps: ApiDeps, body: unknown): Promise<ApiResult> {
 		if (draftName && deps.draftsDir) {
 			archiveDraft(deps.draftsDir, draftName);
 		} else if (!draftName && deps.composeFile && deps.composeDraft && sameMessage(deps, { to, subject, contextId, text })) {
+			// Stop offering it: otherwise reopening Compose would fill it in again for a second send.
+			deps.composeDraft = null;
 			archiveDraft(dirname(deps.composeFile), basename(deps.composeFile));
 		}
 	} catch {
@@ -377,8 +379,8 @@ function sameMessage(
 		return (
 			deps.toNpub(draft.to) === sent.to &&
 			draft.body === sent.text &&
-			(draft.subject ?? null) === (sent.subject ?? null) &&
-			(draft.contextId ?? null) === (sent.contextId ?? null)
+			(draft.subject || null) === (sent.subject || null) &&
+			(draft.contextId || null) === (sent.contextId || null)
 		);
 	} catch {
 		return false;

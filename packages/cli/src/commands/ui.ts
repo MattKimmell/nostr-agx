@@ -2,7 +2,7 @@ import { spawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { DEFAULT_CONTENT_TYPE } from "@nostr-agx/core";
 import { effectiveProfile, getProfile, resolveProfileName, updateProfile } from "../lib/config.js";
@@ -21,6 +21,7 @@ import { type AgxSync, createAgxSync } from "../lib/ui/agx-sync.js";
 import { createDevStore } from "../lib/ui/dev-store.js";
 import {
 	DEFAULT_DRAFT_DIR,
+	isSafeDraftName,
 	loadDraftFile,
 } from "../lib/ui/drafts.js";
 import { startUiServer, type UiAssets } from "../lib/ui/server.js";
@@ -133,6 +134,9 @@ export async function uiCommand(options: UiOptions): Promise<void> {
 					{ exitCode: EXIT.usage, remediation: 'A draft is JSON: {"to": "npub1…", "body": "…", "subject": "…", "contextId": "…"}' },
 				);
 			}
+		}
+		if (composeDraft && options.compose && !isSafeDraftName(basename(resolve(options.compose)))) {
+			warn("The --compose file name is not a plain letters/digits .json name, so it will stay where it is after Send.");
 		}
 		const draftsDir = options.drafts
 			? resolve(options.drafts)
