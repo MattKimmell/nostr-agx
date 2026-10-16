@@ -305,7 +305,7 @@ REST returns the same object without the `{"json":…}` envelope. The absolute U
 | Code | Meaning |
 |---|---|
 | 0 | Done |
-| 1 | Unexpected error |
+| 1 | Unexpected error. Also `inbox` and `ui` when another `serve`, `inbox` or `ui` holds the profile lock (`serve` exits 3 then), a running one that loses that lock, and `thread` with an unknown id. |
 | 2 | Usage: a bad flag or argument |
 | 3 | Local configuration: not logged in, no organization, a credential bound to another server, a malformed file |
 | 4 | Authentication: the key was refused, has expired or is bound to another organization; a login was denied or its code expired |

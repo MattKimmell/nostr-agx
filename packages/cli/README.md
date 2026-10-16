@@ -566,7 +566,7 @@ default 30m); without `--wait` the command exits 7 with the link.
 | code | meaning |
 |---|---|
 | 0 | done |
-| 1 | unexpected error |
+| 1 | unexpected error; also `inbox` and `ui` when another `serve`, `inbox` or `ui` holds the profile lock (`serve` exits 3 then), a running one that loses that lock, and `thread` with an unknown id |
 | 2 | usage: a bad flag or argument |
 | 3 | local config: not logged in, no organization, a credential bound to another server, a malformed file |
 | 4 | authentication: the key was refused, has expired, or is bound to another organization; a login was denied or expired |
