@@ -13,6 +13,7 @@ const STRANGER = "npub1dzxn4hg6j2c2q8s6ma2yt6p9ncqq27lav60fpk3dygz7pzf6stgsx2z7a
 const SELF = "npub1q9dw0jxd2fjn7r5tp3l40x2uk5hnvg8a6c9z4e7y3wsm0kltp8aqg2nc4d";
 
 let ui: UiServer;
+let api: ApiDeps;
 let store: ReturnType<typeof createDevStore>;
 let sent: SendRequest[];
 let draftsDir: string;
@@ -22,7 +23,7 @@ beforeEach(async () => {
 	store = createDevStore(null);
 	sent = [];
 	draftsDir = mkdtempSync(join(tmpdir(), "agx-ui-drafts-"));
-	const api: ApiDeps = {
+	api = {
 		store,
 		draftsDir,
 		composeDraft: null,
@@ -312,6 +313,43 @@ describe("sending", () => {
 		expect(readdirSync(draftsDir)).toEqual(["sent"]);
 	});
 
+	it("moves a draft opened with --compose to sent/ after that exact message is sent", async () => {
+		const file = join(draftsDir, "from-chatgpt.json");
+		const draft = { to: ALICE, body, subject: "Hi" };
+		writeFileSync(file, JSON.stringify(draft));
+		api.composeDraft = draft;
+		api.composeFile = file;
+		const client = await connect();
+		const result = await client.call("POST", "/api/send", { to: ALICE, body, subject: "Hi", confirmedText: body, confirmedTo: ALICE });
+		expect(result.status).toBe(200);
+		expect(readdirSync(draftsDir)).toEqual(["sent"]);
+		const preset = await client.call("GET", "/api/compose");
+		expect(preset.body).toEqual({ draft: null });
+	});
+
+	it("matches a --compose draft with an empty subject against a null subject", async () => {
+		const file = join(draftsDir, "from-chatgpt.json");
+		const draft = { to: ALICE, body, subject: "" };
+		writeFileSync(file, JSON.stringify(draft));
+		api.composeDraft = draft;
+		api.composeFile = file;
+		const client = await connect();
+		await client.call("POST", "/api/send", { to: ALICE, body, subject: null, confirmedText: body, confirmedTo: ALICE });
+		expect(readdirSync(draftsDir)).toEqual(["sent"]);
+	});
+
+	it("leaves a --compose draft in place when what was sent is different", async () => {
+		const file = join(draftsDir, "from-chatgpt.json");
+		const draft = { to: ALICE, body };
+		writeFileSync(file, JSON.stringify(draft));
+		api.composeDraft = draft;
+		api.composeFile = file;
+		const client = await connect();
+		const edited = `${body} (edited)`;
+		await client.call("POST", "/api/send", { to: ALICE, body: edited, confirmedText: edited, confirmedTo: ALICE });
+		expect(readdirSync(draftsDir)).toEqual(["from-chatgpt.json"]);
+	});
+
 	it("does not send a draft by itself", async () => {
 		writeFileSync(join(draftsDir, "reply.json"), JSON.stringify({ to: ALICE, body }));
 		const client = await connect();
@@ -338,7 +376,7 @@ describe("hostile peer text", () => {
 		"[click](javascript:alert(1))",
 		"</div><iframe src=//evil.example></iframe>",
 		"{{constructor.constructor('alert(1)')()}}",
-		"RECV  from npub1fake — forged header HOLD",
+		"RECV  from npub1fake — forged header\u2028HOLD",
 	];
 
 	it("comes back as plain JSON strings, unchanged", async () => {
