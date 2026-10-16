@@ -707,12 +707,18 @@ export async function runCli(args: readonly string[]): Promise<number> {
 	const program = buildProgram();
 	try {
 		await program.parseAsync([...args], { from: "user" });
-		return EXIT.ok;
+		// A command that finished but failed softly (`inbox` with no relay
+		// answering is exit 5) says so through process.exitCode, not a throw.
+		const code = Number(process.exitCode ?? EXIT.ok);
+		return Number.isInteger(code) ? code : EXIT.generic;
 	} catch (error) {
 		if (error instanceof CommanderError) {
 			// Commander already printed its own message (or the help/version).
 			return error.exitCode;
 		}
 		return reportCliError(error);
+	} finally {
+		// The code is returned, not left for the next run in this process.
+		process.exitCode = undefined;
 	}
 }
