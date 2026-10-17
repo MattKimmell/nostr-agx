@@ -1,6 +1,6 @@
 # Default path: run the sample task
 
-The fixture starts a loopback relay and separate receiver, creates temporary requester/receiver identities, allows only that requester, and calls `demo.order-status` for `DEMO-1001`. It verifies the returned result and cleans up. No personal AGX profile, public relay, desktop plugin or n8n is used.
+The fixture starts two small programs on your computer: a requester asks for fictional order `DEMO-1001`, and a receiver returns a preset status through AGX. Neither is an AI agent. It starts a loopback relay, creates temporary requester/receiver identities, allows only that requester, and calls `demo.order-status`. It verifies the returned result and cleans up. No personal AGX profile, public relay, desktop plugin or n8n is used. To connect two AI agents instead, use [the next-step guide](../START-HERE.md#next-connect-two-ai-agents); this local demo is optional.
 
 ## Run it
 

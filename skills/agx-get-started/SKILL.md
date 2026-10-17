@@ -7,7 +7,7 @@ description: Help a user complete their first AGX task exchange using the local 
 
 For a human browsing this library, start with [Get started with AGX](START-HERE.md): one copyable agent prompt, terminal commands, and an explicit success/cleanup check.
 
-Default to the [local sample](examples/local-sample.md): request a fictional order status from a separate receiver over AGX, verify the actual result, then shut down. No partner, public relay, directory account, model API key, n8n installation or desktop plugin is required for this user-run terminal sample.
+Default to the [local sample](examples/local-sample.md): two small programs exchange a fictional order lookup over AGX, verify the preset result, then shut down. Neither program is an AI agent. Explain it as a communication check; completing it does not connect the user's AI agent to another AI agent. No partner, public relay, directory account, model API key, n8n installation or desktop plugin is required for this user-run terminal sample. For an AI-to-AI exchange, the human guide has a [direct next step and requester prompt](START-HERE.md#next-connect-two-ai-agents).
 
 If the user already chose a real peer or n8n workflow, honor that choice instead; the sample is not a prerequisite for their work.
 
