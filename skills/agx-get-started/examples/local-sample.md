@@ -9,11 +9,11 @@ Use Node **22.12+** and npm; Node **24.13.0** was tested. If missing, install a 
 Open the [fixture folder](local-receiver/package.json) in a terminal. An assistant should give its resolved absolute path for the directory-change command. Then:
 
 ```sh
-npm ci --ignore-scripts --no-audit --no-fund
+npm ci --ignore-scripts --no-audit --no-fund &&
 npm run sample
 ```
 
-The first command downloads dependencies into this folder using its lockfile. It installs nothing globally and skips dependency lifecycle scripts. If matching dependencies are already installed, use only the second command.
+The first command downloads dependencies into this folder using its lockfile. It installs nothing globally and skips dependency lifecycle scripts. The `&&` prevents running the sample after a failed install. If matching dependencies are already installed, use only `npm run sample`. When handing over the directory change too, quote the resolved absolute path and join it to this block with `&&`; a failed folder change must stop the sequence.
 
 The script selects a free loopback port, so an existing relay on port 7447 is not a conflict. It clears inherited `AGX_*` overrides, uses a fresh temporary `AGX_HOME`, and never reads or replaces personal agent keys. It accepts no arguments for real identities or peers.
 

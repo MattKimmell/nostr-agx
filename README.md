@@ -39,6 +39,8 @@ The specification reserves `working` and `input-required` states for future stat
 
 ## Guided first task
 
+**For people: [Get started with AGX](skills/agx-get-started/START-HERE.md)** has a copyable prompt, terminal commands and a clear completion check.
+
 The [shared getting-started skill](skills/agx-get-started/SKILL.md) helps an agent guide a user through a real AGX task exchange. Use it from a local checkout or copy the complete `skills/agx-get-started` folder into the host's supported skills directory so its example files are available.
 
 The default sample uses disposable identities and a loopback relay, verifies a fictional order lookup, then cleans up. It needs Node 22.12+ and npm; no partner, model account, public relay or marketplace plugin is needed. The self-contained examples pin published CLI 0.3.0 with their own lockfiles; they do not build or test this checkout's CLI. Use the source walkthrough below to work with the current implementation.
