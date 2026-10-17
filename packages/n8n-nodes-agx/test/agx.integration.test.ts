@@ -153,6 +153,69 @@ describe("AGX node: Task → Request", () => {
 	});
 });
 
+describe("AGX node: Task → Request, guarded", () => {
+	it("refuses a timeout an expression set to 0, which would otherwise never time out", async () => {
+		const n8nAgent = newAgent(relay);
+		const ctx = executeContext({
+			credentials: n8nAgent.credentials,
+			params: () => ({
+				resource: "task",
+				operation: "request",
+				peer: newAgent(relay).publicKey,
+				capability: "invoice.review",
+				payload: "{}",
+				options: { timeout: 0 },
+			}),
+		});
+		await expect(new Agx().execute.call(ctx)).rejects.toThrow(/Timeout \(Seconds\) must be a number/);
+	});
+
+	it("says no relay answered, not that there is no card, when the card cannot be read", async () => {
+		const n8nAgent = newAgent(relay);
+		const ctx = executeContext({
+			credentials: { ...n8nAgent.credentials, relays: "ws://127.0.0.1:1" },
+			params: () => ({
+				resource: "task",
+				operation: "request",
+				peer: newAgent(relay).publicKey,
+				capability: "invoice.review",
+				payload: "{}",
+				options: { checkCard: true },
+			}),
+		});
+		await expect(new Agx().execute.call(ctx)).rejects.toThrow(/No relay answered/);
+	});
+
+	it("keeps concurrent executions' results apart on one identity", async () => {
+		const n8nAgent = newAgent(relay);
+		const reviewer = newAgent(relay);
+		const peer = await peerClient(relay, reviewer, { authorize: "accept-all" });
+		peer.handle<{ n: number }>("echo.n", (task) => ({ n: task.payload.n }));
+		await peer.start({ pollIntervalMs: 250, advertise: false });
+		const run = (n: number) =>
+			new Agx().execute.call(
+				executeContext({
+					credentials: n8nAgent.credentials,
+					params: () => ({
+						resource: "task",
+						operation: "request",
+						peer: reviewer.publicKey,
+						capability: "echo.n",
+						payload: JSON.stringify({ n }),
+						options: { timeout: 20 },
+					}),
+				}),
+			);
+		try {
+			const [a, b] = await Promise.all([run(1), run(2)]);
+			expect(a[0][0].json.output).toEqual({ n: 1 });
+			expect(b[0][0].json.output).toEqual({ n: 2 });
+		} finally {
+			await peer.stop();
+		}
+	});
+});
+
 describe("AGX node: Message → Send", () => {
 	it("delivers an encrypted message the peer can read, with its autoDepth", async () => {
 		const n8nAgent = newAgent(relay);
@@ -190,6 +253,61 @@ describe("AGX node: Message → Send", () => {
 			contextId: "thread-1",
 			autoDepth: 2,
 		});
+	});
+
+	it("counts each new conversation on its own when no Conversation ID is given", async () => {
+		const n8nAgent = newAgent(relay);
+		const reader = newAgent(relay);
+		const ctx = executeContext({
+			credentials: n8nAgent.credentials,
+			items: 3,
+			params: () => ({
+				resource: "message",
+				operation: "send",
+				peer: reader.publicKey,
+				text: "automated",
+				options: { autoDepth: 1, maxPerConversation: 1 },
+			}),
+		});
+		const [out] = await new Agx().execute.call(ctx);
+		expect(out).toHaveLength(3);
+		expect(new Set(out.map((item) => item.json.contextId)).size).toBe(3);
+	});
+
+	it("does not count an automated reply that was not delivered", async () => {
+		const n8nAgent = newAgent(relay);
+		const reader = newAgent(relay);
+		const params = () => ({
+			resource: "message",
+			operation: "send",
+			peer: reader.publicKey,
+			text: "automated",
+			options: { autoDepth: 1, contextId: "thread-3", maxPerConversation: 1 },
+		});
+		const unreachable = executeContext({
+			credentials: { ...n8nAgent.credentials, relays: "ws://127.0.0.1:1" },
+			params,
+		});
+		await expect(new Agx().execute.call(unreachable)).rejects.toThrow(/No relay accepted/);
+		const [out] = await new Agx().execute.call(
+			executeContext({ credentials: n8nAgent.credentials, params }),
+		);
+		expect(out[0].json.contextId).toBe("thread-3");
+	});
+
+	it("refuses an automated-reply depth an expression got wrong, rather than sending it as depth 0", async () => {
+		const n8nAgent = newAgent(relay);
+		const ctx = executeContext({
+			credentials: n8nAgent.credentials,
+			params: () => ({
+				resource: "message",
+				operation: "send",
+				peer: newAgent(relay).publicKey,
+				text: "automated",
+				options: { autoDepth: Number.NaN },
+			}),
+		});
+		await expect(new Agx().execute.call(ctx)).rejects.toThrow(/Automated Reply Depth must be/);
 	});
 
 	it("refuses an automated reply over the depth ceiling, before publishing", async () => {
@@ -242,6 +360,26 @@ describe("AGX node: Agent", () => {
 			capability: "invoice.review",
 			supportsCapability: true,
 		});
+	});
+
+	it("reports a NIP-05 claim it could not check as unconfirmed, not as false", async () => {
+		const n8nAgent = newAgent(relay);
+		const claimant = newAgent(relay);
+		const peer = await peerClient(relay, claimant, {
+			authorize: "accept-all",
+			// The SSRF guard will not fetch from this host, so the claim cannot be
+			// checked either way.
+			identity: { org: "Acme", nip05: "agent@localhost" },
+		});
+		peer.handle("x.y", () => ({}));
+		await peer.start({ pollIntervalMs: 0 });
+		await peer.stop();
+		const ctx = executeContext({
+			credentials: n8nAgent.credentials,
+			params: () => ({ resource: "agent", operation: "getCard", peer: claimant.publicKey }),
+		});
+		const [out] = await new Agx().execute.call(ctx);
+		expect(out[0].json).toMatchObject({ nip05: "agent@localhost", nip05Verified: null });
 	});
 
 	it("says when there is no card, rather than failing", async () => {

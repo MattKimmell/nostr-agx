@@ -110,16 +110,25 @@ export function triggerContext(opts: {
 	credentials: ICredentialDataDecryptedObject;
 	params: IDataObject;
 	mode?: "trigger" | "manual";
+	/** n8n's reason for starting an active trigger: "init" on startup,
+	 * "update" on a save, "activate" when the workflow is turned on. */
+	activationMode?: "init" | "update" | "activate";
 	staticData?: IDataObject;
+	/** Identifies the trigger node; one id per test keeps tests apart. */
+	workflowId?: string;
 }) {
 	const emitted: Emitted[] = [];
 	const staticData = opts.staticData ?? {};
+	const workflowId = opts.workflowId ?? `wf-${Math.random().toString(36).slice(2)}`;
 	const ctx = {
 		getNodeParameter: (name: string, fallback?: unknown) =>
 			opts.params[name] ?? fallback,
 		getCredentials: async () => opts.credentials,
-		getNode: () => ({ ...NODE, name: "AGX Trigger" }),
+		getNode: () => ({ ...NODE, id: "trigger-node", name: "AGX Trigger" }),
+		getWorkflow: () => ({ id: workflowId, active: opts.mode !== "manual" }),
 		getMode: () => opts.mode ?? "trigger",
+		getActivationMode: () =>
+			opts.mode === "manual" ? "manual" : (opts.activationMode ?? "init"),
 		getWorkflowStaticData: () => staticData,
 		logger: quietLogger,
 		helpers: {
@@ -141,7 +150,7 @@ export function triggerContext(opts: {
 			emitted.push({ json: data[0][0].json, done });
 		},
 	};
-	return { ctx: ctx as unknown as ITriggerFunctions, emitted, staticData };
+	return { ctx: ctx as unknown as ITriggerFunctions, emitted, staticData, workflowId };
 }
 
 /** An n8n execution that finished with `items` out of its last node — or

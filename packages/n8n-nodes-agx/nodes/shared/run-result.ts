@@ -97,8 +97,3 @@ export async function awaitTaskOutput(
 	}
 	return taskOutputFromRun(run, options);
 }
-
-/** What a task request too old to run is answered with. */
-export function expiredTaskError(): AgxPublicError {
-	return new AgxPublicError("the task expired before it was run");
-}

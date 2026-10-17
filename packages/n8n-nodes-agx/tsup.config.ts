@@ -6,8 +6,8 @@ import { defineConfig } from "tsup";
  * under `n8n` in package.json, so each node and credential is built to its own
  * CommonJS file at exactly that path.
  *
- * Everything but `n8n-workflow` is bundled in, so the published package has no
- * runtime dependencies: n8n's installer has nothing to resolve, and
+ * Everything but `n8n-workflow` is bundled in, `ws` included, so the published
+ * package has no runtime dependencies: n8n's installer has nothing to resolve, and
  * `@noble/hashes` (ESM-only, pulled in by `@nostr-agx/nostr`) never has to be
  * `require`d. `n8n-workflow` stays external because n8n supplies its own copy,
  * and node classes must share it (error classes are checked with instanceof).
@@ -29,8 +29,9 @@ export default defineConfig({
 	sourcemap: false,
 	splitting: false,
 	dts: false,
-	external: ["n8n-workflow"],
-	noExternal: [/^(?!n8n-workflow$).*/],
+	// `ws` tries these optional native add-ons and carries on without them.
+	external: ["n8n-workflow", "bufferutil", "utf-8-validate"],
+	noExternal: [/^(?!n8n-workflow$|bufferutil$|utf-8-validate$).*/],
 	onSuccess: async () => {
 		await mkdir("dist/icons", { recursive: true });
 		for (const icon of ["agx.svg", "agx.dark.svg"]) {

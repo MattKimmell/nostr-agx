@@ -299,11 +299,11 @@ export class Agx implements INodeType {
 			return [getIdentity(items, identity)];
 		}
 
-		const transport = await createTransport(identity, agxLogger(this.logger));
 		if (resource === "task" && operation === "request") {
-			return [await requestTasks(this, items, transport)];
+			return [await requestTasks(this, items, identity)];
 		}
 		if (resource === "message" && operation === "send") {
+			const transport = await createTransport(identity, agxLogger(this.logger));
 			return [await sendMessages(this, items, transport, identity)];
 		}
 		if (resource === "agent" && operation === "getCard") {

@@ -34,6 +34,12 @@ const HOUR_MS = 60 * 60 * 1000;
 const MAX_TRACKED_CONVERSATIONS = 10_000;
 const MAX_TRACKED_PEERS = 10_000;
 
+/** The guard's answer to one send: a reason to refuse it, or a reservation to
+ * hand back if the send does not go out after all. */
+export type Admission = { refused: string } | { refused: null; release(): void };
+
+const NOTHING_TO_RELEASE: Admission = { refused: null, release: () => undefined };
+
 export class AutoReplyGuard {
 	/** `${from}>${to}` -> send times (ms) within the last hour. */
 	private readonly byPeer = new Map<string, number[]>();
@@ -43,33 +49,39 @@ export class AutoReplyGuard {
 
 	/**
 	 * Admit one send. A depth of 0 is not an automated reply and is never
-	 * bounded: a human in the loop resets the depth. Returns null when the reply
-	 * may go out (and counts it), or the reason it may not. Keyed on the sending
-	 * identity too, since one n8n can hold several agents' credentials.
+	 * bounded: a human in the loop resets the depth. An admitted reply is counted
+	 * at once, so two sends racing each other cannot both slip under a limit;
+	 * `release()` takes the count back for a send that then did not go out.
+	 * Keyed on the sending identity too, since one n8n can hold several agents'
+	 * credentials.
 	 */
 	admit(
 		send: { from: string; to: string; contextId: string; depth: number },
 		limits: AutoReplyLimits,
 		now = Date.now(),
-	): string | null {
+	): Admission {
 		const { depth } = send;
 		if (depth <= 0) {
-			return null;
+			return NOTHING_TO_RELEASE;
 		}
 		if (depth > limits.maxDepth) {
-			return `its automated-reply depth (${depth}) is over this node's ceiling of ${limits.maxDepth}. Two agents answering each other automatically end here; a message a person writes or approves (depth 0) starts the conversation over.`;
+			return { refused: `its automated-reply depth (${depth}) is over this node's ceiling of ${limits.maxDepth}. Two agents answering each other automatically end here; a message a person writes or approves (depth 0) starts the conversation over.` };
 		}
 		const peer = `${send.from}>${send.to}`;
 		const conversation = `${peer}:${send.contextId}`;
 		const inConversation = this.byConversation.get(conversation) ?? 0;
 		if (inConversation >= limits.perConversation) {
-			return `${inConversation} automated replies were already sent to this agent in this conversation (limit ${limits.perConversation}).`;
+			return {
+				refused: `${inConversation} automated replies were already sent to this agent in this conversation (limit ${limits.perConversation}).`,
+			};
 		}
 		const recent = (this.byPeer.get(peer) ?? []).filter(
 			(at) => at > now - HOUR_MS,
 		);
 		if (recent.length >= limits.perPeerPerHour) {
-			return `${recent.length} automated replies were already sent to this agent in the last hour (limit ${limits.perPeerPerHour}).`;
+			return {
+				refused: `${recent.length} automated replies were already sent to this agent in the last hour (limit ${limits.perPeerPerHour}).`,
+			};
 		}
 
 		recent.push(now);
@@ -78,7 +90,29 @@ export class AutoReplyGuard {
 		this.byConversation.delete(conversation);
 		this.byConversation.set(conversation, inConversation + 1);
 		this.evict(now);
-		return null;
+		let released = false;
+		return {
+			refused: null,
+			release: () => {
+				if (released) {
+					return;
+				}
+				released = true;
+				const times = this.byPeer.get(peer);
+				const at = times?.lastIndexOf(now) ?? -1;
+				if (times && at >= 0) {
+					times.splice(at, 1);
+				}
+				const count = this.byConversation.get(conversation);
+				if (count !== undefined) {
+					if (count <= 1) {
+						this.byConversation.delete(conversation);
+					} else {
+						this.byConversation.set(conversation, count - 1);
+					}
+				}
+			},
+		};
 	}
 
 	private evict(now: number): void {

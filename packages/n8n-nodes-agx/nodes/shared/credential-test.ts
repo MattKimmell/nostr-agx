@@ -4,7 +4,7 @@ import type {
 	ICredentialTestFunctions,
 	INodeCredentialTestResult,
 } from "n8n-workflow";
-import { identityFromCredentials, useGlobalWebSocket } from "./identity";
+import { identityFromCredentials, useWebSocket } from "./identity";
 
 /**
  * Credential test: the key parses, and at least one relay answers a query.
@@ -20,7 +20,7 @@ export async function testAgxCredential(
 	let identity: ReturnType<typeof identityFromCredentials>;
 	try {
 		identity = identityFromCredentials(credential.data ?? {});
-		useGlobalWebSocket();
+		useWebSocket();
 	} catch (error) {
 		return {
 			status: "Error",

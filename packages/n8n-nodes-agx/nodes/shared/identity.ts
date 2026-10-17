@@ -14,6 +14,7 @@ import type {
 	LogMetadata,
 } from "n8n-workflow";
 import { nip19 } from "nostr-tools";
+import WebSocket from "ws";
 
 /**
  * The agent identity behind an "AGX Agent Identity" credential: the signer, the
@@ -113,27 +114,21 @@ export function identityFromCredentials(
 	};
 }
 
-/** Point nostr-tools at the runtime's WebSocket. n8n runs on Node.js 24, which
- * has a global one; it is passed explicitly rather than trusting nostr-tools to
- * have picked it up when it loaded. */
-export function useGlobalWebSocket(): void {
-	const impl = (globalThis as { WebSocket?: unknown }).WebSocket;
-	if (!impl) {
-		throw new Error(
-			"This Node.js has no global WebSocket. The AGX nodes need Node.js 22 or later.",
-		);
-	}
-	configureWebSocket(impl);
+/** Point nostr-tools at the bundled `ws`, as the CLI does. Not the runtime's
+ * global WebSocket: Node.js 20 has none, and nothing stops this package being
+ * installed into an n8n that runs on it. */
+export function useWebSocket(): void {
+	configureWebSocket(WebSocket);
 }
 
 export function createTransport(
 	identity: AgxIdentity,
 	logger?: AgxLogger,
 ): Promise<NostrTransport> {
-	useGlobalWebSocket();
 	return NostrTransport.create({
 		signer: identity.signer,
 		relays: identity.relays,
+		ws: WebSocket,
 		logger,
 	});
 }

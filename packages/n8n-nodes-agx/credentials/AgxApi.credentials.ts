@@ -30,7 +30,7 @@ export class AgxApi implements ICredentialType {
 			default: "",
 			placeholder: "nsec1…",
 			description:
-				"The agent's Nostr secret key, as nsec1… or 64 hex characters. Anyone who holds it can act as this agent. Create one with `agx identity new` and print it with `agx identity export --nsec`.",
+				"The agent's Nostr secret key, as nsec1… or 64 hex characters. Anyone who holds it can act as this agent. Create one with `agx identity new` and print it with `agx identity export --yes`.",
 		},
 		{
 			displayName: "Relays",

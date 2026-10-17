@@ -1,11 +1,12 @@
 import {
-	AgxClient,
 	DEFAULT_CONTENT_TYPE,
 	matchesCapability,
+	randomId,
 } from "@nostr-agx/core";
 import {
+	fetchNip05Pubkey,
 	type NostrTransport,
-	resolveNip05,
+	parseNip05,
 	resolvePeerCardWithStatus,
 	resolvePeerRelays,
 	toNpub,
@@ -21,14 +22,13 @@ import {
 	DEFAULT_AUTO_REPLY_LIMITS,
 } from "../shared/auto-reply-guard";
 import { type AgxIdentity, agxLogger } from "../shared/identity";
+import { MAX_WAIT_SEC, numberOption } from "../shared/numbers";
 import { parsePeer } from "../shared/peers";
+import { Requester } from "../shared/requester";
 
-/** How often a pending request polls this agent's inbox for its result. */
-const RESULT_POLL_MS = 1_000;
-
-function nowSec(): number {
-	return Math.floor(Date.now() / 1000);
-}
+/** The largest `contextId` the AGX payload schema accepts. A longer one would
+ * make the recipient discard the whole message as malformed. */
+const MAX_CONTEXT_ID = 200;
 
 function messageOf(error: unknown): string {
 	return error instanceof Error ? error.message : String(error);
@@ -100,24 +100,16 @@ export function getIdentity(
 }
 
 /**
- * Task → Request. Every item's request goes out at once through one client,
- * which then polls this agent's inbox until each has its result or times out:
- * n items cost one wait, not n.
+ * Task → Request. Every item's request goes out at once, through the
+ * identity's shared requester (see `Requester`), which polls this agent's inbox
+ * until each has its result or times out: n items cost one wait, not n.
  */
 export async function requestTasks(
 	ctx: IExecuteFunctions,
 	items: INodeExecutionData[],
-	transport: NostrTransport,
+	identity: AgxIdentity,
 ): Promise<INodeExecutionData[]> {
-	// Start the cursor at now: the poll still reaches back the full NIP-59
-	// backdate (two days), which is all a result sent from now on can be dated,
-	// instead of reading the whole retained inbox from zero.
-	const client = new AgxClient({
-		transport,
-		logger: agxLogger(ctx.logger),
-		startCursor: nowSec(),
-	});
-	await client.start({ pollIntervalMs: 0, advertise: false });
+	const requester = await Requester.for(identity, agxLogger(ctx.logger));
 
 	const request = async (i: number): Promise<IDataObject> => {
 		const peer = parsePeer(ctx.getNodeParameter("peer", i) as string);
@@ -131,12 +123,30 @@ export async function requestTasks(
 		const payload = parsePayload(ctx, ctx.getNodeParameter("payload", i, "{}"), i);
 		const options = ctx.getNodeParameter("options", i, {}) as {
 			checkCard?: boolean;
-			timeout?: number;
+			timeout?: unknown;
 		};
-		const timeoutSec = options.timeout ?? 30;
+		const timeoutSec = numberOption(options.timeout, "Timeout (Seconds)", 30, {
+			min: 1,
+			max: MAX_WAIT_SEC,
+		});
 
 		if (options.checkCard) {
-			const { card } = await transport.resolvePeer(peer);
+			const { card, reachable } = await resolvePeerCardWithStatus(
+				peer,
+				identity.relays,
+				identity.signer,
+			);
+			if (!reachable) {
+				throw new NodeOperationError(
+					ctx.getNode(),
+					`No relay answered (${identity.relays.join(", ")}), so ${npub}'s card could not be read`,
+					{
+						itemIndex: i,
+						description:
+							"Check the credential's relays. Whether the agent advertises the capability is unknown until one of them answers.",
+					},
+				);
+			}
 			if (!card) {
 				throw new NodeOperationError(
 					ctx.getNode(),
@@ -162,9 +172,7 @@ export async function requestTasks(
 
 		let output: unknown;
 		try {
-			output = await client.request(peer, capability, payload, {
-				timeoutMs: timeoutSec * 1000,
-			});
+			output = await requester.request(peer, capability, payload, timeoutSec * 1000);
 		} catch (error) {
 			const message = messageOf(error);
 			if (message.startsWith("AGX request timed out")) {
@@ -173,7 +181,7 @@ export async function requestTasks(
 					`No result from ${npub} within ${timeoutSec} seconds`,
 					{
 						itemIndex: i,
-						description: `AGX denies by default and a denied request gets no reply, so first check that the agent has allowed this one (${toNpub(transport.whoami())}). Then check that it is running, serves "${capability}", and shares a relay with this agent or advertises its relays.`,
+						description: `AGX denies by default and a denied request gets no reply, so first check that the agent has allowed this one (${identity.npub}). Then check that it is running, serves "${capability}", and shares a relay with this agent or advertises its relays.`,
 					},
 				);
 			}
@@ -193,34 +201,16 @@ export async function requestTasks(
 
 	// Settled results, so one item failing does not leave the others' requests
 	// unanswered behind a thrown error.
-	const outcomes = items.map((_, i) =>
-		request(i).then(
-			(json) => ({ ok: true as const, json }),
-			(error: unknown) => ({ ok: false as const, error }),
+	const outcomes = await Promise.all(
+		items.map((_, i) =>
+			request(i).then(
+				(json) => ({ ok: true as const, json }),
+				(error: unknown) => ({ ok: false as const, error }),
+			),
 		),
 	);
-	let settled = false;
-	const all = Promise.all(outcomes).finally(() => {
-		settled = true;
-	});
-	try {
-		while (!settled) {
-			await client.pump().catch((error) =>
-				ctx.logger.warn("AGX: inbox poll failed; retrying", {
-					error: messageOf(error),
-				}),
-			);
-			await Promise.race([
-				all,
-				new Promise((resolve) => setTimeout(resolve, RESULT_POLL_MS)),
-			]);
-		}
-	} finally {
-		await client.stop();
-	}
-
 	const out: INodeExecutionData[] = [];
-	for (const [i, outcome] of (await all).entries()) {
+	for (const [i, outcome] of outcomes.entries()) {
 		if (outcome.ok) {
 			out.push({ json: outcome.json, pairedItem: { item: i } });
 		} else if (ctx.continueOnFail()) {
@@ -253,44 +243,82 @@ export async function sendMessages(
 		const to = parsePeer(ctx.getNodeParameter("peer", i) as string);
 		const text = ctx.getNodeParameter("text", i) as string;
 		const options = ctx.getNodeParameter("options", i, {}) as {
-			autoDepth?: number;
+			autoDepth?: unknown;
 			contextId?: string;
-			maxAutoDepth?: number;
-			maxPerConversation?: number;
-			maxPerHour?: number;
+			maxAutoDepth?: unknown;
+			maxPerConversation?: unknown;
+			maxPerHour?: unknown;
 			subject?: string;
 		};
-		const depth = Math.max(0, Math.trunc(Number(options.autoDepth ?? 0)) || 0);
-		const contextId = options.contextId?.trim() || null;
-
-		const refusal = autoReplyGuard.admit(
-			{ from: identity.publicKey, to, contextId: contextId ?? "", depth },
-			{
-				maxDepth: options.maxAutoDepth ?? DEFAULT_AUTO_REPLY_LIMITS.maxDepth,
-				perConversation:
-					options.maxPerConversation ??
-					DEFAULT_AUTO_REPLY_LIMITS.perConversation,
-				perPeerPerHour:
-					options.maxPerHour ?? DEFAULT_AUTO_REPLY_LIMITS.perPeerPerHour,
-			},
-		);
-		if (refusal) {
+		// Checked rather than coerced: an expression that yields NaN must not
+		// quietly become depth 0, which would pass an automated reply off as one a
+		// person wrote and skip every loop bound below.
+		const depth = numberOption(options.autoDepth, "Automated Reply Depth", 0, {
+			min: 0,
+			max: 255,
+			integer: true,
+		});
+		const limits = {
+			maxDepth: numberOption(
+				options.maxAutoDepth,
+				"Max Automated Reply Depth",
+				DEFAULT_AUTO_REPLY_LIMITS.maxDepth,
+				{ min: 1, max: 255, integer: true },
+			),
+			perConversation: numberOption(
+				options.maxPerConversation,
+				"Max Automated Replies per Conversation",
+				DEFAULT_AUTO_REPLY_LIMITS.perConversation,
+				{ min: 1, max: 1_000_000, integer: true },
+			),
+			perPeerPerHour: numberOption(
+				options.maxPerHour,
+				"Max Automated Replies per Agent per Hour",
+				DEFAULT_AUTO_REPLY_LIMITS.perPeerPerHour,
+				{ min: 1, max: 1_000_000, integer: true },
+			),
+		};
+		// A new conversation gets its id here rather than from the transport, so
+		// the guard counts the conversation this message really starts — not one
+		// shared bucket for every send that left the field empty.
+		const contextId = options.contextId?.trim() || randomId();
+		if (contextId.length > MAX_CONTEXT_ID) {
 			throw new NodeOperationError(
 				ctx.getNode(),
-				"Automated reply not sent (loop protection)",
-				{ itemIndex: i, description: `Not sent because ${refusal}` },
+				`Conversation ID is longer than ${MAX_CONTEXT_ID} characters`,
+				{ itemIndex: i },
 			);
 		}
 
-		const res = await transport.publishMessage(to, {
-			text,
-			subject: options.subject?.trim() || null,
-			contextId,
-			contentType: DEFAULT_CONTENT_TYPE,
-			// Declared only on an automated reply; 0 is the same as absent.
-			autoDepth: depth > 0 ? depth : undefined,
-		});
+		const admission = autoReplyGuard.admit(
+			{ from: identity.publicKey, to, contextId, depth },
+			limits,
+		);
+		if (admission.refused !== null) {
+			throw new NodeOperationError(
+				ctx.getNode(),
+				"Automated reply not sent (loop protection)",
+				{ itemIndex: i, description: `Not sent because ${admission.refused}` },
+			);
+		}
+
+		let res: Awaited<ReturnType<NostrTransport["publishMessage"]>>;
+		try {
+			res = await transport.publishMessage(to, {
+				text,
+				subject: options.subject?.trim() || null,
+				contextId,
+				contentType: DEFAULT_CONTENT_TYPE,
+				// Declared only on an automated reply; 0 is the same as absent.
+				autoDepth: depth > 0 ? depth : undefined,
+			});
+		} catch (error) {
+			admission.release();
+			throw new NodeOperationError(ctx.getNode(), error as Error, { itemIndex: i });
+		}
 		if (!res.ok) {
+			// Not delivered, so it does not count against the loop bounds.
+			admission.release();
 			const detail =
 				res.rejected.length > 0
 					? res.rejected.map((r) => `${r.relay} (${r.error})`).join("; ")
@@ -319,6 +347,20 @@ export async function sendMessages(
 			rejected: res.rejected,
 		};
 	});
+}
+
+/** Whether the domain a card's NIP-05 claim names maps that name back to the
+ * agent: `true`, `false` when it names another key or the claim is malformed,
+ * and `null` when it could not be told — `fetchNip05Pubkey` answers null both
+ * for a domain it could not read and for a name the domain does not list, and a
+ * passing outage is not evidence of impersonation. */
+async function verifyNip05(claim: string, pubkey: string): Promise<boolean | null> {
+	const parsed = parseNip05(claim);
+	if (!parsed) {
+		return false;
+	}
+	const published = await fetchNip05Pubkey(parsed.name, parsed.domain);
+	return published === null ? null : published === pubkey;
 }
 
 /** Agent → Get Card. */
@@ -350,13 +392,11 @@ export async function getCards(
 				},
 			);
 		}
-		const verified =
+		// Verified against the card just read, not a second fetch of it, so the
+		// verdict is about the claim this output shows.
+		const nip05Verified =
 			card?.nip05 && options.verifyNip05 !== false
-				? await resolveNip05({
-						pubkey: peer,
-						relays: identity.relays,
-						signer: identity.signer,
-					}).catch(() => null)
+				? await verifyNip05(card.nip05, peer)
 				: null;
 		const capability = options.capability?.trim();
 		return {
@@ -366,9 +406,7 @@ export async function getCards(
 			org: card?.displayName ?? null,
 			capabilities: card?.capabilities ?? [],
 			nip05: card?.nip05 ?? null,
-			// null when there was nothing to verify or verification was off.
-			nip05Verified:
-				card?.nip05 && options.verifyNip05 !== false ? verified !== null : null,
+			nip05Verified,
 			relays,
 			...(capability
 				? {

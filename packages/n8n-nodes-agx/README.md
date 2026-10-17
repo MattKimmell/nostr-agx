@@ -36,8 +36,7 @@ npm install @nostr-agx/n8n-nodes-agx
 ```
 
 The package has no runtime dependencies of its own: everything except `n8n-workflow` is bundled
-into each node. The nodes use the runtime's built-in WebSocket, which n8n's supported Node.js
-versions all have.
+into each node, the `ws` WebSocket client included, so it runs on any Node.js version n8n does.
 
 ## Credentials
 
@@ -70,12 +69,13 @@ Asks an agent to run one of its capabilities and waits for the result.
 | Agent | The other agent's `npub1…` or hex public key. |
 | Capability | The capability to run, such as `invoice.review`. |
 | Payload | JSON the agent's handler receives. |
-| Timeout (Seconds) | How long to wait for the result. Default 30. |
+| Timeout (Seconds) | How long to wait for the result, from 1 second to a day. Default 30. |
 | Check Agent Card First | Read the agent's card first, and fail at once if it does not advertise the capability. |
 
 Output: `{ peer, capability, status: "completed", output }`, where `output` is whatever the agent
 returned. All items are requested at once and the node waits for every result, so ten items cost
-one wait, not ten.
+one wait, not ten. Requests from the same identity share one client across executions, so an AI
+Agent calling the tool repeatedly does not reread the inbox each time.
 
 If the agent reports a failure, the node fails with its message. That message is `handler failed`
 unless the other side chose to share more: AGX keeps an agent's internal errors on its own side.
@@ -108,15 +108,19 @@ for a message a person wrote or approved: that starts the count over.
 An automated reply (depth above 0) is refused before it is published when its depth is over **Max
 Automated Reply Depth** (8), when this conversation already had **Max Automated Replies per
 Conversation** (20), or when the agent already had **Max Automated Replies per Agent per Hour**
-(60). The counts are kept per n8n process.
+(60). The counts are kept per n8n process, and a reply that no relay accepted is not counted. A
+message sent without a Conversation ID starts a new conversation, and is counted as one.
 
 ### Agent → Get Card
 
 Reads the Agent Card an agent publishes: `{ npub, pubkey, found, org, capabilities, nip05,
 nip05Verified, relays }`. Set **Capability to Check** to add `supportsCapability`, which honors
 wildcards (`invoice.*`). **Verify NIP-05** (on by default) checks the claimed domain identity
-against that domain. A card says who holds the key and what the agent claims to do; it does not
-vouch for the quality of its work.
+against that domain: `nip05Verified` is `true` when the domain maps the name to this agent's key,
+`false` when it maps it to another key or the claim is malformed, and `null` when there is no
+claim, verification is off, or the domain could not confirm it (unreachable, or no such name). A
+card says who holds the key and what the agent claims to do; it does not vouch for the quality of
+its work.
 
 ### Agent → Get Own Identity
 
@@ -134,21 +138,23 @@ Makes the workflow an agent. Choose the **Events** to listen for:
 
 | Event | Starts the workflow when | Output fields |
 | --- | --- | --- |
-| Task Request | an allowed agent asks this one to run a capability listed under **Capabilities** | `event: "task"`, `taskId`, `capability`, `payload`, `from`, `fromPubkey`, `contextId`, `sentAt` |
+| Task Request | an allowed agent asks this one to run a capability listed under **Capabilities**, by exact name (`invoice.review`, not `invoice.*`) | `event: "task"`, `taskId`, `capability`, `payload`, `from`, `fromPubkey`, `contextId`, `sentAt` |
 | Message | an allowed agent sends a plain message | `event: "message"`, `from`, `fromPubkey`, `allowed`, `text`, `subject`, `contextId`, `messageId`, `eventId`, `contentType`, `autoDepth`, `replyAutoDepth`, `sentAt` |
-| Delivery Receipt | an agent confirms it received a message this agent sent | `event: "receipt"`, `from`, `fromPubkey`, `allowed`, `status`, `refEventId`, `contextId`, `eventId`, `sentAt` |
+| Delivery Receipt | an allowed agent confirms it received a message this agent sent | `event: "receipt"`, `from`, `fromPubkey`, `allowed`, `status`, `refEventId`, `contextId`, `eventId`, `sentAt` |
 
 `from` is the sender's `npub`, ready to use as the **Agent** of an AGX node that answers it.
 
 ### Who may reach the workflow
 
 List the agents under **Allowed Agents** (`npub1…` or hex, separated by commas or new lines).
-Nobody else can run this agent's capabilities, and their requests get no reply. A trigger that
-nothing could ever start — tasks or messages with nobody allowed — refuses to activate.
+Nobody else can run this agent's capabilities, and their requests get no reply; their messages and
+receipts are ignored too. A trigger that nothing could ever start — tasks, messages or receipts
+with nobody allowed — refuses to activate.
 
 **Accept All Agents** opens the capabilities to anyone who can reach the agent. Turn it on only
-for something meant to be public. **Include Messages From Unlisted Agents** lets anyone's
-*messages* start the workflow, marked `allowed: false`, without opening the capabilities.
+for something meant to be public. **Include Messages and Receipts From Unlisted Agents** lets
+anyone's messages and receipts start the workflow, marked `allowed: false`, without opening the
+capabilities.
 
 ### The task result
 
@@ -164,32 +170,33 @@ data is not sent.
   workflow did not finish in time". Keep it below the requesters' own timeouts where you can — the
   AGX node and the CLI wait 30 seconds by default.
 - **One task at a time.** Tasks are answered in order, so a slow workflow holds up the next one.
-- **Ignore Tasks Older Than (Minutes)** (10): a request sent longer ago than this is answered with
-  "the task expired before it was run" instead of running the workflow; its requester has almost
-  certainly stopped waiting.
+- **Ignore Tasks Older Than (Minutes)** (10): a request sent longer ago than this is ignored, with
+  no reply; its requester has almost certainly stopped waiting.
 
 ### Restarts, saves and test runs
 
 n8n restarts a trigger every time its workflow is saved. AGX relays deliver the last two days of an
-inbox on every poll, so the trigger keeps its replay state in the workflow's static data and
-records each event just before it starts an execution. A restarted trigger therefore never runs
-the same task twice. A crash in the middle of an execution means that task gets no result; the
-requester's timeout covers it.
+inbox on every poll, so the trigger keeps its replay state in the workflow's static data (by node
+id, so renaming the node keeps it) and records each event just before it starts an execution. A
+restarted trigger therefore never runs the same task twice. A crash in the middle of an execution
+means that task gets no result; the requester's timeout covers it.
 
-When the workflow is first activated, the trigger starts from its inbox as it is then: nothing sent
-more than five minutes earlier starts the workflow.
+When the workflow is turned on, the trigger starts from its inbox as it is then: nothing sent more
+than five minutes earlier starts the workflow, including what arrived while it was off. When n8n
+restarts, or the workflow is saved while on, it resumes where it left off instead.
 
 **Listen for test event** handles one event per test run, sent at most five minutes before you
-started listening. Within one n8n process, an event a test run handled is not delivered to the next
-test run. Test runs do not save state, though, so such an event can start the workflow again once
-it is active.
+started listening. Within one n8n process, a test run and the active trigger share their records,
+so a task is answered once even while both listen, and a test run does not deliver what the
+active trigger or an earlier test run handled. In queue mode, where a test run may execute in
+another process than the active trigger, deactivate the workflow before testing it.
 
 ### Other options
 
 | Option | |
 | --- | --- |
 | Advertise Agent Card | Publish this agent's card — capabilities, organization, relays — when the workflow starts. Cards are public. Agents on other relays find this agent's relays through it. Off by default. |
-| Poll Interval (Seconds) | How often the inbox is checked. Default 3. |
+| Poll Interval (Seconds) | How often the inbox is checked, from 1 to 3600. Default 3. |
 
 ## Try it with the `agx` CLI
 

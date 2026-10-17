@@ -2,6 +2,7 @@ import {
 	AgxClient,
 	type AgxIncomingMessage,
 	type AgxIncomingReceipt,
+	parseTaskEnvelope,
 	type Task,
 	TASK_CONTENT_TYPE,
 } from "@nostr-agx/core";
@@ -22,23 +23,19 @@ import {
 	createTransport,
 	identityFromCredentials,
 } from "../shared/identity";
-import { watchInbox } from "../shared/inbox-watch";
+import { isoOrNull, MAX_WAIT_SEC, numberOption } from "../shared/numbers";
 import { parseCapabilities, parsePeerList } from "../shared/peers";
-import {
-	awaitTaskOutput,
-	expiredTaskError,
-	type ResultMode,
-} from "../shared/run-result";
+import { awaitTaskOutput, type ResultMode } from "../shared/run-result";
 import { TriggerState } from "../shared/trigger-state";
 
 interface TriggerOptions {
 	advertise?: boolean;
 	forwardErrors?: boolean;
 	includeUnlisted?: boolean;
-	maxTaskAge?: number;
-	pollInterval?: number;
+	maxTaskAge?: unknown;
+	pollInterval?: unknown;
 	result?: ResultMode;
-	resultTimeout?: number;
+	resultTimeout?: unknown;
 }
 
 /** The done-promise `emit` takes: settled with the finished execution. */
@@ -48,8 +45,13 @@ function nowSec(): number {
 	return Math.floor(Date.now() / 1000);
 }
 
-function isoOrNull(sec: number | undefined): string | null {
-	return sec === undefined ? null : new Date(sec * 1000).toISOString();
+/** What a handler returns when this trigger gives a task up: a promise that
+ * never settles. `AgxClient` answers every task whose handler settles, so this
+ * is the one way to leave a task to the trigger instance that does run it,
+ * with no second (failed) result from this one. Once the trigger is
+ * discarded, nothing references the promise or the pump waiting on it. */
+function giveUp(): Promise<never> {
+	return new Promise<never>(() => undefined);
 }
 
 /**
@@ -96,7 +98,7 @@ export class AgxTrigger implements INodeType {
 					{
 						name: "Delivery Receipt",
 						value: "receipt",
-						description: "An agent confirms it received a message this agent sent",
+						description: "An allowed agent confirms it received a message this agent sent",
 					},
 					{
 						name: "Message",
@@ -120,7 +122,7 @@ export class AgxTrigger implements INodeType {
 				default: "",
 				placeholder: "invoice.review, invoice.approve",
 				description:
-					"Capabilities this workflow serves, separated by commas. A request for anything else gets no reply.",
+					"Capabilities this workflow serves, by their exact names, separated by commas. A request for anything else gets no reply.",
 				displayOptions: { show: { events: ["task"] } },
 			},
 			{
@@ -165,17 +167,17 @@ export class AgxTrigger implements INodeType {
 						typeOptions: { minValue: 0 },
 						default: 10,
 						description:
-							"Answer a task request sent longer ago than this with a failure instead of running it: its requester has almost certainly stopped waiting. 0 turns this off.",
+							"Ignore a task request sent longer ago than this, with no reply: its requester has almost certainly stopped waiting. 0 turns this off.",
 						displayOptions: { show: { "/events": ["task"] } },
 					},
 					{
-						displayName: "Include Messages From Unlisted Agents",
+						displayName: "Include Messages and Receipts From Unlisted Agents",
 						name: "includeUnlisted",
 						type: "boolean",
 						default: false,
 						description:
-							"Whether messages from agents that are not allowed start the workflow too, marked allowed: false. Their tasks are never run.",
-						displayOptions: { show: { "/events": ["message"] } },
+							"Whether messages and delivery receipts from agents that are not allowed start the workflow too, marked allowed: false. Their tasks are never run.",
+						displayOptions: { show: { "/events": ["message", "receipt"] } },
 					},
 					{
 						displayName: "Poll Interval (Seconds)",
@@ -237,23 +239,40 @@ export class AgxTrigger implements INodeType {
 
 	async trigger(this: ITriggerFunctions): Promise<ITriggerResponse> {
 		const node = this.getNode();
-		let identity: ReturnType<typeof identityFromCredentials>;
-		let capabilities: string[];
-		let allowed: Set<string>;
 		const events = new Set(this.getNodeParameter("events", []) as string[]);
 		const acceptAll = this.getNodeParameter("acceptAll", false) as boolean;
 		const options = this.getNodeParameter("options", {}) as TriggerOptions;
 		const serveTasks = events.has("task");
+		const includeUnlisted = options.includeUnlisted === true;
+		let identity: ReturnType<typeof identityFromCredentials>;
+		let capabilities: string[];
+		let allowed: Set<string>;
+		let resultTimeoutMs: number;
+		let maxTaskAgeSec: number;
+		let pollIntervalMs: number;
 		try {
-			identity = identityFromCredentials(
-				await this.getCredentials("agxApi"),
-			);
+			identity = identityFromCredentials(await this.getCredentials("agxApi"));
 			capabilities = serveTasks
 				? parseCapabilities(this.getNodeParameter("capabilities", "") as string)
 				: [];
 			allowed = acceptAll
 				? new Set()
 				: new Set(parsePeerList(this.getNodeParameter("allowedPeers", "") as string));
+			resultTimeoutMs =
+				numberOption(options.resultTimeout, "Result Timeout (Seconds)", 120, {
+					min: 1,
+					max: MAX_WAIT_SEC,
+				}) * 1000;
+			maxTaskAgeSec =
+				numberOption(options.maxTaskAge, "Ignore Tasks Older Than (Minutes)", 10, {
+					min: 0,
+					max: 7 * 24 * 60,
+				}) * 60;
+			pollIntervalMs =
+				numberOption(options.pollInterval, "Poll Interval (Seconds)", 3, {
+					min: 1,
+					max: 3600,
+				}) * 1000;
 		} catch (error) {
 			throw new NodeOperationError(node, error as Error);
 		}
@@ -266,11 +285,25 @@ export class AgxTrigger implements INodeType {
 				"Add the capabilities this workflow serves, such as invoice.review",
 			);
 		}
-		const includeUnlisted = options.includeUnlisted === true;
+		// `AgxClient` runs a handler for exactly the capability it was registered
+		// under, so `invoice.*` would be advertised and never served: a requester
+		// whose card check accepted it would wait for a reply that never comes.
+		const wildcards = capabilities.filter((capability) => capability.includes("*"));
+		if (wildcards.length > 0) {
+			throw new NodeOperationError(
+				node,
+				`List each capability by name: ${wildcards.join(", ")} cannot be served`,
+				{
+					description:
+						"A request names one exact capability, so name each one this workflow serves, such as invoice.review, invoice.approve.",
+				},
+			);
+		}
 		if (
 			!acceptAll &&
 			allowed.size === 0 &&
-			(serveTasks || (events.has("message") && !includeUnlisted))
+			(serveTasks ||
+				((events.has("message") || events.has("receipt")) && !includeUnlisted))
 		) {
 			throw new NodeOperationError(node, "No agent is allowed to reach this workflow", {
 				description:
@@ -280,23 +313,27 @@ export class AgxTrigger implements INodeType {
 
 		const manual = this.getMode() === "manual";
 		const logger = agxLogger(this.logger);
+		const scope = {
+			workflowId: this.getWorkflow().id ?? "",
+			nodeId: node.id ?? node.name,
+			pubkey: identity.publicKey,
+		};
 		const state = manual
-			? TriggerState.forManualRun(identity.publicKey, nowSec())
+			? TriggerState.forManualRun(this.getWorkflowStaticData("global"), scope, nowSec())
 			: TriggerState.forActiveWorkflow(
-					this.getWorkflowStaticData("node"),
-					identity.publicKey,
+					this.getWorkflowStaticData("global"),
+					scope,
 					nowSec(),
+					// Turned on, as opposed to restarted or saved while on: start from
+					// the inbox as it is now, not from what came in while it was off.
+					{ fresh: ["activate", "create"].includes(this.getActivationMode()) },
 				);
 		const transport = await createTransport(identity, logger);
-		const inbox = watchInbox(transport, state.since);
 
 		const resultOptions = {
 			mode: options.result ?? "firstItem",
 			forwardErrors: options.forwardErrors === true,
 		};
-		const resultTimeoutMs = (options.resultTimeout ?? 120) * 1000;
-		const maxTaskAgeSec = (options.maxTaskAge ?? 10) * 60;
-		const pollIntervalMs = (options.pollInterval ?? 3) * 1000;
 		const isAllowed = (from: string) => acceptAll || allowed.has(from);
 
 		// A manual test run handles ONE event: n8n runs the test with the first
@@ -310,36 +347,33 @@ export class AgxTrigger implements INodeType {
 		// whatever this one leaves unclaimed.
 		let closed = false;
 		let slotTaken = false;
-		const takeSlot = (): boolean => {
-			if (closed || (manual && slotTaken)) {
+		const canEmit = () => !closed && !(manual && slotTaken);
+
+		/** Claim an event and start an execution with it — unless the trigger
+		 * closed, the test run's slot is taken, or another instance of this trigger
+		 * (the one this replaced, the active one during a test) has it already. */
+		const emit = (json: IDataObject, ids: string[], done?: DonePromise): boolean => {
+			if (!canEmit() || !state.tryClaim(ids, nowSec())) {
 				return false;
 			}
 			slotTaken = true;
+			// Claimed first: n8n saves the static data as part of this emit.
+			this.emit([[{ json }]], undefined, done);
 			return true;
 		};
-
-		const emit = (json: IDataObject, claim: string[], done?: DonePromise) => {
-			// Claim first: n8n saves the static data as part of this emit.
-			state.claim(claim, nowSec());
-			this.emit([[{ json }]], undefined, done);
-		};
+		const eventIds = (event: { eventId: string; transportId?: string }) =>
+			event.transportId && event.transportId !== event.eventId
+				? [event.eventId, event.transportId]
+				: [event.eventId];
 
 		const runTask = async (task: Task): Promise<unknown> => {
-			const request = inbox.taskRequest(task.from, task.taskId);
-			const sentAt = request?.sentAt;
-			if (maxTaskAgeSec > 0 && sentAt !== undefined && nowSec() - sentAt > maxTaskAgeSec) {
-				// Nothing is emitted, so a manual run's slot goes to the next event.
-				slotTaken = false;
-				state.claim(request?.eventIds ?? [], nowSec());
-				logger.info?.("AGX Trigger: task request too old to run; answering with a failure", {
-					from: toNpub(task.from),
-					capability: task.capability,
-					sentAt: isoOrNull(sentAt),
-				});
-				throw expiredTaskError();
-			}
+			// `authorize` reserved the test run's slot for this task; hand it to
+			// `emit`, which checks again. The delivery receipt went out in between —
+			// a relay round trip in which n8n may have closed this trigger, or
+			// another instance of it taken the task.
+			slotTaken = false;
 			const done = this.helpers.createDeferredPromise<IRun>();
-			emit(
+			const started = emit(
 				{
 					event: "task",
 					taskId: task.taskId,
@@ -348,11 +382,17 @@ export class AgxTrigger implements INodeType {
 					from: toNpub(task.from),
 					fromPubkey: task.from,
 					contextId: task.contextId,
-					sentAt: isoOrNull(sentAt),
+					sentAt: isoOrNull(task.sentAt),
 				},
-				request?.eventIds ?? [],
+				eventIds(task),
 				done,
 			);
+			if (!started) {
+				logger.debug?.("AGX Trigger: task left to another instance of this trigger", {
+					taskId: task.taskId,
+				});
+				return giveUp();
+			}
 			return awaitTaskOutput(done.promise, {
 				...resultOptions,
 				timeoutMs: resultTimeoutMs,
@@ -365,10 +405,39 @@ export class AgxTrigger implements INodeType {
 			logger,
 			identity: { org: identity.org ?? undefined, nip05: identity.nip05 },
 			startCursor: state.cursor,
+			// Dropped before anything else: no receipt, no reply. Events from before
+			// the trigger was turned on, and task requests too old for anyone to
+			// still be waiting on.
+			ignore: (event) => {
+				const sentAt = event.sentAt ?? event.createdAt;
+				if (sentAt < state.since) {
+					return true;
+				}
+				if (
+					"receipt" in event ||
+					maxTaskAgeSec === 0 ||
+					event.contentType !== TASK_CONTENT_TYPE ||
+					nowSec() - sentAt <= maxTaskAgeSec ||
+					parseTaskEnvelope(event.text)?.t !== "req"
+				) {
+					return false;
+				}
+				logger.info?.("AGX Trigger: ignored a task request too old to run", {
+					from: toNpub(event.from),
+					sentAt: isoOrNull(event.sentAt),
+				});
+				return true;
+			},
 			// A function rather than the "accept-all" sentinel even when every agent
-			// is accepted, because the manual-run slot gates it too. The explicit
+			// is accepted, because the trigger's own state gates it too. The explicit
 			// opt-in the SPEC asks for is the node's Accept All Agents switch.
-			authorize: ({ from }) => isAllowed(from) && takeSlot(),
+			authorize: ({ from }) => {
+				if (!isAllowed(from) || !canEmit()) {
+					return false;
+				}
+				slotTaken = true;
+				return true;
+			},
 			onMessage: async (msg: AgxIncomingMessage) => {
 				// Task traffic `AgxClient` did not consume lands here too: a request
 				// for a capability this trigger does not serve, a denied request, or a
@@ -376,14 +445,11 @@ export class AgxTrigger implements INodeType {
 				// Request operation). None of it is a message for this workflow — the
 				// task may well be another workflow's on the same identity — so it is
 				// dropped here, still with no reply, as the SPEC requires.
-				if (msg.contentType === TASK_CONTENT_TYPE) {
+				if (msg.contentType === TASK_CONTENT_TYPE || !events.has("message")) {
 					return;
 				}
 				const allowedSender = isAllowed(msg.from);
-				if (!events.has("message") || (!allowedSender && !includeUnlisted)) {
-					return;
-				}
-				if (!takeSlot()) {
+				if (!allowedSender && !includeUnlisted) {
 					return;
 				}
 				const autoDepth = msg.autoDepth ?? 0;
@@ -405,11 +471,17 @@ export class AgxTrigger implements INodeType {
 						replyAutoDepth: autoDepth + 1,
 						sentAt: isoOrNull(msg.sentAt),
 					},
-					[msg.eventId],
+					eventIds(msg),
 				);
 			},
 			onReceipt: async (receipt: AgxIncomingReceipt) => {
-				if (!events.has("receipt") || !takeSlot()) {
+				if (!events.has("receipt")) {
+					return;
+				}
+				// Anyone can address a receipt to this agent, so receipts are gated
+				// like messages: otherwise a stranger could start executions at will.
+				const allowedSender = isAllowed(receipt.from);
+				if (!allowedSender && !includeUnlisted) {
 					return;
 				}
 				emit(
@@ -417,14 +489,14 @@ export class AgxTrigger implements INodeType {
 						event: "receipt",
 						from: toNpub(receipt.from),
 						fromPubkey: receipt.from,
-						allowed: isAllowed(receipt.from),
+						allowed: allowedSender,
 						status: receipt.receipt.status,
 						refEventId: receipt.receipt.refEventId,
 						contextId: receipt.receipt.contextId,
 						eventId: receipt.eventId,
 						sentAt: isoOrNull(receipt.sentAt),
 					},
-					[receipt.eventId],
+					eventIds(receipt),
 				);
 			},
 		});

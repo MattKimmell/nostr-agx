@@ -31,7 +31,6 @@ export default defineConfig({
 		],
 	},
 	test: {
-		setupFiles: ["test/setup.ts"],
 		// Relay round trips include NIP-13 mining on every wrap.
 		testTimeout: 30_000,
 	},
