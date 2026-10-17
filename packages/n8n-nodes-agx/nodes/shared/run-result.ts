@@ -63,16 +63,20 @@ export function taskOutputFromRun(
 
 /** Resolves like `promise`, or rejects once `ms` pass. The rejection is a
  * public error: "it did not finish in time" tells the requester nothing about
- * this side. */
+ * this side. `AbortSignal.timeout` rather than a timer n8n would have us
+ * cancel with `sleepWithAbort`, which is newer than the n8n-workflow current
+ * n8n ships: its timer does not keep the process alive, and once the race is
+ * decided its firing changes nothing. */
 function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
-	let timer: ReturnType<typeof setTimeout> | undefined;
+	const signal = AbortSignal.timeout(ms);
 	const timeout = new Promise<never>((_, reject) => {
-		timer = setTimeout(
+		signal.addEventListener(
+			"abort",
 			() => reject(new AgxPublicError("the workflow did not finish in time")),
-			ms,
+			{ once: true },
 		);
 	});
-	return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
+	return Promise.race([promise, timeout]);
 }
 
 /**
@@ -84,16 +88,12 @@ export async function awaitTaskOutput(
 	execution: Promise<IRun>,
 	options: ResultOptions & { timeoutMs: number },
 ): Promise<unknown> {
-	let run: IRun;
-	try {
-		run = await withTimeout(execution, options.timeoutMs);
-	} catch (error) {
-		if (error instanceof AgxPublicError || !options.forwardErrors) {
-			throw error;
-		}
-		throw new AgxPublicError(
-			error instanceof Error ? error.message : String(error),
-		);
-	}
+	const run = await withTimeout(execution, options.timeoutMs).catch(
+		(error: unknown) => {
+			throw error instanceof AgxPublicError || !options.forwardErrors
+				? error
+				: new AgxPublicError(error instanceof Error ? error.message : String(error));
+		},
+	);
 	return taskOutputFromRun(run, options);
 }

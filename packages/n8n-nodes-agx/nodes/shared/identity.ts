@@ -33,22 +33,34 @@ export interface AgxIdentity {
 	nip05: string | null;
 }
 
+function decodeNsec(input: string): Uint8Array | null {
+	try {
+		const decoded = nip19.decode(input);
+		return decoded.type === "nsec" ? decoded.data : null;
+	} catch {
+		return null;
+	}
+}
+
+function urlProtocol(input: string): string | null {
+	try {
+		return new URL(input).protocol;
+	} catch {
+		return null;
+	}
+}
+
 /** Accept an `nsec1…` key or a bare 64-character hex secret, as the CLI does.
  * `@nostr-agx/nostr` deliberately exposes no nsec codec, so `nostr-tools`'
  * `nip19` is used directly. */
 export function parseSecretKey(input: string): Uint8Array {
 	const trimmed = input.trim();
 	if (trimmed.startsWith("nsec1")) {
-		let decoded: ReturnType<typeof nip19.decode>;
-		try {
-			decoded = nip19.decode(trimmed);
-		} catch {
+		const secretKey = decodeNsec(trimmed);
+		if (!secretKey) {
 			throw new Error("The secret key is not a valid nsec1… key.");
 		}
-		if (decoded.type !== "nsec") {
-			throw new Error("The secret key is not a valid nsec1… key.");
-		}
-		return decoded.data;
+		return secretKey;
 	}
 	if (/^[0-9a-f]{64}$/i.test(trimmed)) {
 		return hexToBytes(trimmed.toLowerCase());
@@ -72,10 +84,8 @@ export function parseRelays(input: string): string[] {
 		if (!entry) {
 			continue;
 		}
-		let protocol: string;
-		try {
-			protocol = new URL(entry).protocol;
-		} catch {
+		const protocol = urlProtocol(entry);
+		if (protocol === null) {
 			throw new Error(`"${entry}" is not a relay URL.`);
 		}
 		if (protocol !== "wss:" && protocol !== "ws:") {

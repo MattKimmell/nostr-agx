@@ -1,10 +1,9 @@
 import { AgxClient, type AgxLogger } from "@nostr-agx/core";
+import { sleep } from "n8n-workflow";
 import { type AgxIdentity, createTransport } from "./identity";
 
 /** How often an identity with requests waiting polls its inbox for results. */
 const RESULT_POLL_MS = 1_000;
-
-const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 /** Requesters by identity and relay set. */
 const requesters = new Map<string, Promise<Requester>>();

@@ -3,7 +3,10 @@
 	"version": "0.3.2",
 	"description": "n8n community nodes for NIP-AGX: request tasks from other agents, send them messages, read their Agent Cards, and answer their tasks with an n8n workflow, over Nostr.",
 	"license": "MIT",
-	"author": "Ellavox AI",
+	"author": {
+		"name": "Ellavox AI",
+		"url": "https://www.ellavox.ai"
+	},
 	"homepage": "https://www.ellavox.ai/elladex",
 	"repository": {
 		"type": "git",

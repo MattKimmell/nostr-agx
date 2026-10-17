@@ -16,6 +16,7 @@ import {
 	type ITriggerResponse,
 	NodeConnectionTypes,
 	NodeOperationError,
+	sleep,
 } from "n8n-workflow";
 import { testAgxCredential } from "../shared/credential-test";
 import {
@@ -504,24 +505,25 @@ export class AgxTrigger implements INodeType {
 			client.handle(capability, runTask);
 		}
 
-		let timer: ReturnType<typeof setTimeout> | undefined;
+		// One poll at a time, then a wait: a slow relay can never overlap two.
+		// A close takes effect at the end of the wait in progress, when the loop
+		// sees `closed` and stops (n8n's cancellable `sleepWithAbort` is newer
+		// than the n8n-workflow current n8n ships).
 		const pumpLoop = async (): Promise<void> => {
-			timer = undefined;
-			if (closed) {
-				return;
-			}
-			try {
-				const { cursor, complete } = await client.pump();
-				if (complete) {
-					state.setCursor(cursor);
+			while (!closed) {
+				try {
+					const { cursor, complete } = await client.pump();
+					if (complete) {
+						state.setCursor(cursor);
+					}
+				} catch (error) {
+					logger.warn?.("AGX Trigger: inbox poll failed; will retry", {
+						error: error instanceof Error ? error.message : String(error),
+					});
 				}
-			} catch (error) {
-				logger.warn?.("AGX Trigger: inbox poll failed; will retry", {
-					error: error instanceof Error ? error.message : String(error),
-				});
-			}
-			if (!closed) {
-				timer = setTimeout(() => void pumpLoop(), pollIntervalMs);
+				if (!closed) {
+					await sleep(pollIntervalMs);
+				}
 			}
 		};
 		const start = async (): Promise<void> => {
@@ -542,9 +544,6 @@ export class AgxTrigger implements INodeType {
 
 		const closeFunction = async (): Promise<void> => {
 			closed = true;
-			if (timer) {
-				clearTimeout(timer);
-			}
 			// An in-flight task is NOT awaited. In a manual run n8n awaits this
 			// before the execution's end hook, and that hook is what settles the
 			// task's done-promise: waiting here would hang until the result timeout.
