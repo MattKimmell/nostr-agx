@@ -26,7 +26,25 @@ export function signDelivery(secret: string, timestamp: number, body: string): s
 export type DeliveryOutcome =
 	| { kind: "response"; status: number; body: unknown }
 	| { kind: "timeout" }
-	| { kind: "unreachable"; error: string };
+	/** `sent`: the connection was made, so the webhook may have the event. */
+	| { kind: "unreachable"; error: string; sent: boolean };
+
+/** Errors from a connection that was made and then broke, so the webhook may
+ * have the event. Anything else (refused, no such host, a blocked port, a bad
+ * certificate) failed before the request went out. */
+const BROKE_OFF = new Set([
+	"ECONNRESET",
+	"ECONNABORTED",
+	"EPIPE",
+	"UND_ERR_SOCKET",
+	"UND_ERR_CLOSED",
+	"UND_ERR_HEADERS_TIMEOUT",
+	"UND_ERR_BODY_TIMEOUT",
+]);
+
+function isTimeout(error: unknown): boolean {
+	return error instanceof Error && (error.name === "TimeoutError" || error.name === "AbortError");
+}
 
 /** POST one event to a subscription's webhook and wait for its answer. */
 export async function deliver(
@@ -55,17 +73,26 @@ export async function deliver(
 			signal: AbortSignal.timeout(timeoutMs),
 		});
 	} catch (error) {
-		if (error instanceof Error && (error.name === "TimeoutError" || error.name === "AbortError")) {
+		if (isTimeout(error)) {
 			return { kind: "timeout" };
 		}
-		const cause = error instanceof Error && error.cause instanceof Error ? `: ${error.cause.message}` : "";
-		return { kind: "unreachable", error: `${error instanceof Error ? error.message : String(error)}${cause}` };
+		const cause = error instanceof Error && error.cause instanceof Error ? error.cause : null;
+		const code = (cause as { code?: unknown } | null)?.code;
+		return {
+			kind: "unreachable",
+			error: `${error instanceof Error ? error.message : String(error)}${cause ? `: ${cause.message}` : ""}`,
+			sent: typeof code === "string" && BROKE_OFF.has(code),
+		};
 	}
 	let text: string;
 	try {
 		text = await response.text();
 	} catch (error) {
-		return { kind: "unreachable", error: error instanceof Error ? error.message : String(error) };
+		// The answer stalled, or broke off, after the webhook got the event.
+		if (isTimeout(error)) {
+			return { kind: "timeout" };
+		}
+		return { kind: "unreachable", error: error instanceof Error ? error.message : String(error), sent: true };
 	}
 	let parsed: unknown = text;
 	if (text) {
@@ -120,6 +147,8 @@ export class DeliveryQueue {
 	private readonly maxQueued: number;
 	private readonly timeoutMs: number;
 	private idleWaiters: (() => void)[] = [];
+	/** Deliveries waiting out a retry delay, outside the in-flight slots. */
+	private retrying = 0;
 
 	constructor(private readonly options: DeliveryQueueOptions = {}) {
 		this.concurrency = options.concurrency ?? 4;
@@ -141,10 +170,14 @@ export class DeliveryQueue {
 
 	/** Resolves once nothing is waiting or in flight (tests, shutdown). */
 	idle(): Promise<void> {
-		if (this.active === 0 && this.waiting.length === 0) {
+		if (this.isIdle()) {
 			return Promise.resolve();
 		}
 		return new Promise((resolve) => this.idleWaiters.push(resolve));
+	}
+
+	private isIdle(): boolean {
+		return this.active === 0 && this.waiting.length === 0 && this.retrying === 0;
 	}
 
 	private drain(): void {
@@ -155,35 +188,47 @@ export class DeliveryQueue {
 				void this.run(next).finally(() => {
 					this.active -= 1;
 					this.drain();
-					if (this.active === 0 && this.waiting.length === 0) {
-						for (const resolve of this.idleWaiters.splice(0)) {
-							resolve();
-						}
-					}
+					this.settle();
 				});
 			}
 		}
 	}
 
-	private async run(item: Queued): Promise<void> {
-		for (;;) {
-			const outcome = await deliver(item.subscription, item.event, item.eventId, this.timeoutMs);
-			if (outcome.kind === "response" && outcome.status >= 200 && outcome.status < 300) {
-				return;
+	private settle(): void {
+		if (this.isIdle()) {
+			for (const resolve of this.idleWaiters.splice(0)) {
+				resolve();
 			}
-			const detail =
-				outcome.kind === "response"
-					? `HTTP ${outcome.status}`
-					: outcome.kind === "timeout"
-						? "no answer in time"
-						: outcome.error;
-			const delay = this.retryDelaysMs[item.attempt];
-			if (!retryable(outcome) || delay === undefined) {
-				this.options.onFailure?.(item.subscription, item.eventId, detail);
-				return;
-			}
-			item.attempt += 1;
-			await runtime().sleep(delay);
 		}
+	}
+
+	private async run(item: Queued): Promise<void> {
+		const outcome = await deliver(item.subscription, item.event, item.eventId, this.timeoutMs);
+		if (outcome.kind === "response" && outcome.status >= 200 && outcome.status < 300) {
+			return;
+		}
+		const detail =
+			outcome.kind === "response"
+				? `HTTP ${outcome.status}`
+				: outcome.kind === "timeout"
+					? "no answer in time"
+					: outcome.error;
+		const delay = this.retryDelaysMs[item.attempt];
+		if (!retryable(outcome) || delay === undefined) {
+			this.options.onFailure?.(item.subscription, item.eventId, detail);
+			return;
+		}
+		item.attempt += 1;
+		// Waited out of its slot: a webhook that is down holds up no other.
+		this.retrying += 1;
+		void runtime()
+			.sleep(delay)
+			.catch(() => undefined)
+			.then(() => {
+				this.retrying -= 1;
+				this.waiting.push(item);
+				this.drain();
+				this.settle();
+			});
 	}
 }

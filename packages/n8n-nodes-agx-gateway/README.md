@@ -223,7 +223,9 @@ and starts nothing.
 **Listen for test event** subscribes n8n's test URL for as long as n8n listens. While it does, the
 gateway hands a matching task to the test run, and to the active workflow once the test run has
 ended; a message or receipt goes to both. The gateway keeps its subscriptions on disk and its place in the inbox, so a restart of
-either n8n or the gateway neither loses the subscription nor runs a task twice.
+either n8n or the gateway neither loses the subscription nor runs a task twice. A task is recorded
+as handled before n8n gets it: if the gateway stops while the workflow runs, the requester gets no
+result, and its timeout covers that.
 
 ## Try it with the `agx` CLI
 

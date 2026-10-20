@@ -1,5 +1,7 @@
 import { createHmac } from "node:crypto";
+import { existsSync, readFileSync } from "node:fs";
 import { createServer, type IncomingMessage, type Server } from "node:http";
+import { join } from "node:path";
 import type { AddressInfo } from "node:net";
 import { AgxClient, DEFAULT_CONTENT_TYPE } from "@nostr-agx/core";
 import { generateKeypair, localSigner, NostrTransport, toNpub } from "@nostr-agx/nostr";
@@ -8,6 +10,8 @@ import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import { type RunningRelay, startRelay } from "../../relay/server.js";
 import { agx, sandbox } from "../../test/helpers.js";
 import { resolveProfileName } from "../config.js";
+import { profileDir, seenPath } from "../paths.js";
+import { MESSAGES_FILE } from "../store/message-store.js";
 import { type RunningGateway, startGateway } from "./gateway.js";
 import { createGatewayKey } from "./keys.js";
 
@@ -223,6 +227,9 @@ describe("agx gateway: outbound", () => {
 			}
 		}
 		expect(msg).toMatchObject({ text: "Invoice 1234 is approved.", contextId: "1234", autoDepth: 2 });
+		// Kept in the profile's history, as `agx send` keeps what it sends.
+		const history = join(profileDir(profile), MESSAGES_FILE);
+		await waitFor(() => existsSync(history) && readFileSync(history, "utf8").includes(String(sent.eventId)));
 
 		const empty = await api("/v1/messages", {
 			method: "POST",
@@ -280,6 +287,10 @@ describe("agx gateway: subscriptions", () => {
 			{ url: hook.url, events: ["task"], capabilities: ["invoice.*"], acceptAll: true },
 			{ url: "ftp://example.com/x", events: ["message"], acceptAll: true },
 			{ url: hook.url, events: ["task"], acceptAll: true },
+			// Cloud metadata, link-local, multicast: never a webhook.
+			{ url: "http://169.254.169.254/latest/meta-data/", events: ["message"], acceptAll: true },
+			{ url: "http://[fe80::1]/hook", events: ["message"], acceptAll: true },
+			{ url: "http://224.0.0.1/hook", events: ["message"], acceptAll: true },
 		]) {
 			const res = await api("/v1/subscriptions", { method: "POST", body: JSON.stringify(body) });
 			expect(res.status).toBe(400);
@@ -288,10 +299,35 @@ describe("agx gateway: subscriptions", () => {
 	});
 });
 
+describe("agx gateway: Agent Card", () => {
+	it("keeps a capability on the card when its subscription is replaced", async () => {
+		const reader = await peer();
+		const card = async () => {
+			const res = await api(`/v1/agents/${gateway.npub}?capability=invoice.card&verifyNip05=false`);
+			return (await json(res)).supportsCapability;
+		};
+		const hook = await webhook();
+		const body = { url: hook.url, events: ["task"], capabilities: ["invoice.card"], allowedPeers: [reader.npub], advertise: true };
+		const first = await subscribe(body);
+		await new Promise((r) => setTimeout(r, 2500));
+		expect(await card()).toBe(true);
+		// What n8n does on a republish: DELETE, then POST the same at once.
+		expect((await api(`/v1/subscriptions/${first.id}`, { method: "DELETE" })).status).toBe(204);
+		const second = await subscribe(body);
+		await new Promise((r) => setTimeout(r, 2500));
+		expect(await card()).toBe(true);
+		await api(`/v1/subscriptions/${second.id}`, { method: "DELETE" });
+	}, 30_000);
+});
+
 describe("agx gateway: inbound", () => {
 	it("runs an allowed agent's task through the webhook and sends its answer back, signed", async () => {
 		const requester = await peer();
-		const hook = await webhook((event) => ({ status: 200, body: { reviewed: (event.payload as { id: number }).id } }));
+		let seenOnDisk = "";
+		const hook = await webhook((event) => {
+			seenOnDisk = readFileSync(seenPath(profile), "utf8");
+			return { status: 200, body: { reviewed: (event.payload as { id: number }).id } };
+		});
 		const sub = await subscribe({
 			url: hook.url,
 			events: ["task"],
@@ -311,6 +347,9 @@ describe("agx gateway: inbound", () => {
 			fromPubkey: requester.publicKey,
 		});
 		expect(delivery.headers["x-agx-subscription"]).toBe(sub.id);
+		// On disk before the webhook had it: a crash while the workflow runs
+		// cannot run it again.
+		expect(seenOnDisk).toContain(String(delivery.headers["x-agx-delivery"]));
 	}, 30_000);
 
 	it("never reaches the webhook for an agent the subscription does not allow, and sends no reply", async () => {

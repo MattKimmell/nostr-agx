@@ -1,5 +1,7 @@
 import { randomBytes } from "node:crypto";
+import { lookup } from "node:dns/promises";
 import { existsSync, readFileSync } from "node:fs";
+import { isIP } from "node:net";
 import { normalizePubkey } from "@nostr-agx/nostr";
 import { z } from "zod";
 import { gatewaySubscriptionsPath, writePrivateJson } from "../paths.js";
@@ -58,6 +60,48 @@ const fileSchema = z.object({
 export type Subscription = z.infer<typeof storedSchema>;
 /** A subscription as the API shows it after creation: without its secret. */
 export type SubscriptionView = Omit<Subscription, "secret">;
+
+/**
+ * Addresses a webhook may not point at: link-local, where cloud metadata
+ * services answer (169.254.169.254), unspecified, and multicast. Loopback and
+ * private networks stay allowed, since n8n often runs on the same machine or
+ * network as the gateway.
+ */
+function isForbiddenAddress(address: string): boolean {
+	const lower = address.toLowerCase();
+	const v4 = lower.startsWith("::ffff:") ? lower.slice(7) : lower;
+	if (isIP(v4) === 4) {
+		const [a, b] = v4.split(".").map(Number);
+		return a === 0 || (a === 169 && b === 254) || a >= 224;
+	}
+	return lower === "::" || /^fe[89ab]/.test(lower) || lower.startsWith("ff") || lower === "fd00:ec2::254";
+}
+
+/**
+ * Refuse a webhook URL whose host is, or resolves to, a forbidden address: an
+ * API key would otherwise read a metadata service through a task the gateway
+ * sends itself. Checked when the subscription is made; a host whose DNS
+ * changes later is not caught, and one that does not resolve yet is allowed.
+ */
+export async function assertWebhookHost(rawUrl: string): Promise<void> {
+	const { hostname } = new URL(rawUrl);
+	const host = hostname.replace(/^\[|\]$/g, "");
+	let addresses: string[];
+	if (isIP(host)) {
+		addresses = [host];
+	} else {
+		try {
+			addresses = (await lookup(host, { all: true, verbatim: true })).map((entry) => entry.address);
+		} catch {
+			return;
+		}
+	}
+	if (addresses.some(isForbiddenAddress)) {
+		throw new SubscriptionError(
+			`Invalid subscription: ${hostname} is a link-local, multicast or unspecified address, which a webhook may not use`,
+		);
+	}
+}
 
 /** A rejected subscription request, with a message fit to show the user. */
 export class SubscriptionError extends Error {}

@@ -18,6 +18,8 @@ import { gatewayKeysPath, writePrivateJson } from "../paths.js";
 
 const KEY_PREFIX = "agxg_";
 export const GATEWAY_KEY_ENV = "AGX_GATEWAY_KEY";
+/** The shortest `AGX_GATEWAY_KEY` accepted; a shorter one is never matched. */
+export const MIN_ENV_KEY_CHARS = 32;
 
 const storedKeySchema = z.object({
 	id: z.string(),
@@ -86,7 +88,7 @@ export function revokeGatewayKey(profile: string, id: string): boolean {
 
 /** Whether any key could be presented: one in the file, or the env one. */
 export function gatewayKeysConfigured(profile: string): boolean {
-	return Boolean(process.env[GATEWAY_KEY_ENV]) || readKeys(profile).length > 0;
+	return (process.env[GATEWAY_KEY_ENV]?.length ?? 0) >= MIN_ENV_KEY_CHARS || readKeys(profile).length > 0;
 }
 
 /**
@@ -95,13 +97,13 @@ export function gatewayKeysConfigured(profile: string): boolean {
  * close. Returns the matching key's id (`env` for `AGX_GATEWAY_KEY`), or null.
  */
 export function verifyGatewayKey(profile: string, presented: string): string | null {
-	if (!presented.startsWith(KEY_PREFIX) && presented !== process.env[GATEWAY_KEY_ENV]) {
+	if (!presented) {
 		return null;
 	}
 	const hash = hashKey(presented);
 	let match: string | null = null;
 	const envKey = process.env[GATEWAY_KEY_ENV];
-	if (envKey && timingSafeEqual(hash, hashKey(envKey))) {
+	if (envKey && envKey.length >= MIN_ENV_KEY_CHARS && timingSafeEqual(hash, hashKey(envKey))) {
 		match = "env";
 	}
 	for (const key of readKeys(profile)) {

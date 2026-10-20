@@ -31,6 +31,7 @@ import { verifyGatewayKey } from "./keys.js";
 import { type OperationDeps, readCard, requestTask, sendMessage } from "./operations.js";
 import { Requester } from "./requester.js";
 import {
+	assertWebhookHost,
 	parseSubscriptionInput,
 	SubscriptionError,
 	SubscriptionStore,
@@ -77,6 +78,11 @@ export interface RunningGateway {
 }
 
 export const DEFAULT_GATEWAY_PORT = 8787;
+/** How long the card waits for subscription changes to settle before it is
+ * republished: over a second, so two cards never carry the same timestamp. */
+const CARD_SETTLE_MS = 1_100;
+/** How long before a card no relay accepted is published again. */
+const CARD_RETRY_MS = 30_000;
 
 function nowSec(): number {
 	return Math.floor(Date.now() / 1000);
@@ -94,6 +100,7 @@ export async function startGateway(options: GatewayOptions): Promise<RunningGate
 	const identity = loadIdentity(name);
 	const releaseLock = acquireLock(name);
 	let closed = false;
+	let stopGateway: (() => Promise<void>) | undefined;
 	try {
 		const state = loadState(name);
 		const transport = await createTransport(profile, identity, options.logger);
@@ -133,6 +140,13 @@ export async function startGateway(options: GatewayOptions): Promise<RunningGate
 			transport,
 			requester,
 			guard: new AutoReplyGuard(),
+			recordSent: (message) => {
+				try {
+					store.addOutbound(message);
+				} catch (error) {
+					log(`A sent message could not be recorded in the history: ${error instanceof Error ? error.message : String(error)}`);
+				}
+			},
 		};
 
 		const runTask = async (task: Task): Promise<unknown> => {
@@ -141,6 +155,15 @@ export async function startGateway(options: GatewayOptions): Promise<RunningGate
 				// The subscription went away between authorization and now.
 				throw new AgxTaskDeclined("no webhook serves it any more");
 			}
+			// Recorded as handled, on disk, before any webhook sees it: a crash or
+			// restart while the workflow runs then costs the requester its result
+			// (its timeout covers that) instead of running the workflow twice.
+			for (const id of [task.eventId, task.transportId]) {
+				if (id) {
+					seen.add(id);
+				}
+			}
+			seen.flush();
 			log(`TASK  ${task.capability} from ${toNpub(task.from)}`);
 			for (const subscription of targets) {
 				const outcome = await deliver(
@@ -152,10 +175,19 @@ export async function startGateway(options: GatewayOptions): Promise<RunningGate
 				if (outcome.kind === "timeout") {
 					throw new AgxPublicError("the workflow did not finish in time");
 				}
-				if (outcome.kind === "unreachable" || outcome.status === 404 || outcome.status === 410) {
-					// Gone or down: an older subscription for the same capability may
-					// still answer (a test webhook n8n dropped, say).
-					log(`SKIP  ${subscription.id}: ${outcome.kind === "unreachable" ? outcome.error : `HTTP ${outcome.status}`}`);
+				if (outcome.kind === "unreachable") {
+					if (outcome.sent) {
+						// The webhook may have the task and be running it: trying another
+						// could run it twice.
+						throw new Error(`the webhook connection failed: ${outcome.error}`);
+					}
+					// Down: an older subscription for the same capability may answer.
+					log(`SKIP  ${subscription.id}: ${outcome.error}`);
+					continue;
+				}
+				if (outcome.status === 404 || outcome.status === 410) {
+					// Gone (a test webhook n8n dropped, say): an older one may answer.
+					log(`SKIP  ${subscription.id}: HTTP ${outcome.status}`);
 					continue;
 				}
 				if (outcome.status >= 200 && outcome.status < 300) {
@@ -227,29 +259,49 @@ export async function startGateway(options: GatewayOptions): Promise<RunningGate
 		registerHandlers();
 
 		// The card lists what subscriptions that advertise serve, and is
-		// republished when that changes.
+		// republished when that changes: one publish at a time, once changes
+		// settle. n8n replaces a subscription with a DELETE and a POST in quick
+		// succession, and of two cards published in the same second a relay may
+		// keep either.
 		let advertised: string | null = null;
-		const advertise = async () => {
-			const capabilities = subscriptions.advertised();
-			const key = capabilities.join("\n");
-			if (key === advertised || (advertised === null && capabilities.length === 0) || !transport.advertise) {
-				return;
-			}
-			try {
-				await transport.advertise(capabilities, {
-					org: profile.org ?? undefined,
-					nip05: profile.nip05,
-					payloadTypes: [DEFAULT_CONTENT_TYPE, TASK_CONTENT_TYPE],
-				});
-				advertised = key;
-				log(`CARD  advertised ${capabilities.length ? capabilities.join(", ") : "no capabilities"}`);
-			} catch (error) {
-				log(`CARD  could not be published: ${error instanceof Error ? error.message : String(error)}`);
+		let publishing: Promise<void> = Promise.resolve();
+		let cardTimer: ReturnType<typeof setTimeout> | null = null;
+		const publishCard = async () => {
+			// Again until the card matches the subscriptions: they may have changed
+			// while it was being published.
+			while (!closed && transport.advertise) {
+				const capabilities = subscriptions.advertised();
+				const key = capabilities.join("\n");
+				if (key === advertised || (advertised === null && capabilities.length === 0)) {
+					return;
+				}
+				try {
+					const { ok } = await transport.advertise(capabilities, {
+						org: profile.org ?? undefined,
+						nip05: profile.nip05,
+						payloadTypes: [DEFAULT_CONTENT_TYPE, TASK_CONTENT_TYPE],
+					});
+					if (!ok) {
+						throw new Error("no relay accepted it");
+					}
+					advertised = key;
+					log(`CARD  advertised ${capabilities.length ? capabilities.join(", ") : "no capabilities"}`);
+				} catch (error) {
+					log(`CARD  could not be published, will retry: ${error instanceof Error ? error.message : String(error)}`);
+					advertise(CARD_RETRY_MS);
+					return;
+				}
 			}
 		};
-
-		await client.start({ pollIntervalMs: 0, advertise: false });
-		await advertise();
+		const advertise = (delayMs = CARD_SETTLE_MS) => {
+			if (cardTimer) {
+				clearTimeout(cardTimer);
+			}
+			cardTimer = setTimeout(() => {
+				cardTimer = null;
+				publishing = publishing.then(publishCard);
+			}, delayMs);
+		};
 
 		let cursor = state.cursor;
 		const persist = () => {
@@ -259,7 +311,7 @@ export async function startGateway(options: GatewayOptions): Promise<RunningGate
 			updateState(name, { cursor, lastPumpAt: new Date().toISOString() });
 		};
 		let wake: (() => void) | null = null;
-		const pumpLoop = (async () => {
+		const runPump = async () => {
 			const interval = options.pollIntervalMs ?? 3000;
 			while (!closed) {
 				try {
@@ -284,7 +336,7 @@ export async function startGateway(options: GatewayOptions): Promise<RunningGate
 					wake = null;
 				}
 			}
-		})();
+		};
 
 		const route = async (req: IncomingMessage, res: ServerResponse): Promise<void> => {
 			const url = new URL(req.url ?? "/", "http://gateway");
@@ -335,6 +387,7 @@ export async function startGateway(options: GatewayOptions): Promise<RunningGate
 					let input: ReturnType<typeof parseSubscriptionInput>;
 					try {
 						input = parseSubscriptionInput(await readJson(req));
+						await assertWebhookHost(input.url);
 					} catch (error) {
 						if (error instanceof SubscriptionError) {
 							throw new ApiError(400, "invalid_subscription", error.message);
@@ -343,7 +396,7 @@ export async function startGateway(options: GatewayOptions): Promise<RunningGate
 					}
 					const subscription = subscriptions.create(input);
 					registerHandlers();
-					void advertise();
+					advertise();
 					log(`SUB   ${subscription.id} → ${subscription.url} (${subscription.events.join(", ")})`);
 					// The secret is shown once, here: the webhook verifies deliveries with it.
 					sendJson(res, 201, { ...viewOf(subscription), secret: subscription.secret });
@@ -365,7 +418,7 @@ export async function startGateway(options: GatewayOptions): Promise<RunningGate
 					if (!subscriptions.delete(id)) {
 						throw new ApiError(404, "not_found", `No subscription ${id}`);
 					}
-					void advertise();
+					advertise();
 					log(`UNSUB ${id}`);
 					res.writeHead(204);
 					res.end();
@@ -392,6 +445,25 @@ export async function startGateway(options: GatewayOptions): Promise<RunningGate
 		// A task request waits for its result, up to an hour.
 		server.requestTimeout = 0;
 		server.headersTimeout = 60_000;
+		let pumpLoop: Promise<void> = Promise.resolve();
+		stopGateway = async () => {
+			closed = true;
+			if (cardTimer) {
+				clearTimeout(cardTimer);
+			}
+			(wake as (() => void) | null)?.();
+			await new Promise<void>((resolve) => {
+				server.close(() => resolve());
+				server.closeAllConnections();
+			});
+			requester.stop();
+			await Promise.race([
+				Promise.all([pumpLoop, publishing]),
+				new Promise((resolve) => setTimeout(resolve, 10_000)),
+			]);
+			await client.stop().catch(() => undefined);
+		};
+
 		const host = options.host ?? "127.0.0.1";
 		await new Promise<void>((resolve, reject) => {
 			server.once("error", reject);
@@ -400,6 +472,13 @@ export async function startGateway(options: GatewayOptions): Promise<RunningGate
 				resolve();
 			});
 		});
+		// Inbound traffic only once the API is up: a gateway that cannot listen
+		// delivers nothing.
+		await client.start({ pollIntervalMs: 0, advertise: false });
+		publishing = publishing.then(publishCard);
+		await publishing;
+		pumpLoop = runPump();
+
 		const port = (server.address() as AddressInfo).port;
 		const shownHost = host.includes(":") ? `[${host}]` : host;
 
@@ -412,23 +491,14 @@ export async function startGateway(options: GatewayOptions): Promise<RunningGate
 				if (closed) {
 					return;
 				}
-				closed = true;
-				(wake as (() => void) | null)?.();
-				await new Promise<void>((resolve) => {
-					server.close(() => resolve());
-					server.closeAllConnections();
-				});
-				requester.stop();
-				await Promise.race([pumpLoop, new Promise((resolve) => setTimeout(resolve, 10_000))]);
-				await client.stop().catch(() => undefined);
+				await stopGateway?.();
 				persist();
 				releaseLock();
 			},
 		};
 	} catch (error) {
-		if (!closed) {
-			releaseLock();
-		}
+		await stopGateway?.().catch(() => undefined);
+		releaseLock();
 		throw error;
 	}
 }

@@ -86,9 +86,11 @@ describe("gateway API keys", () => {
 		expect(verifyGatewayKey("default", key)).toBeNull();
 	});
 
-	it("accepts AGX_GATEWAY_KEY from the environment", () => {
-		process.env.AGX_GATEWAY_KEY = "env-provided-key-0123456789";
-		expect(verifyGatewayKey("default", "env-provided-key-0123456789")).toBe("env");
-		expect(verifyGatewayKey("default", "env-provided-key-012345678")).toBeNull();
+	it("accepts AGX_GATEWAY_KEY from the environment, if it is long enough to guess", () => {
+		process.env.AGX_GATEWAY_KEY = "env-provided-key-0123456789abcdef";
+		expect(verifyGatewayKey("default", "env-provided-key-0123456789abcdef")).toBe("env");
+		expect(verifyGatewayKey("default", "env-provided-key-0123456789abcde")).toBeNull();
+		process.env.AGX_GATEWAY_KEY = "short-key";
+		expect(verifyGatewayKey("default", "short-key")).toBeNull();
 	});
 });

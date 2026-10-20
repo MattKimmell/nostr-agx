@@ -7,6 +7,7 @@ import {
 	GATEWAY_KEY_ENV,
 	gatewayKeysConfigured,
 	listGatewayKeys,
+	MIN_ENV_KEY_CHARS,
 	revokeGatewayKey,
 } from "../lib/gateway/keys.js";
 import { SubscriptionStore } from "../lib/gateway/subscriptions.js";
@@ -46,6 +47,12 @@ export async function gatewayCommand(options: GatewayCommandOptions): Promise<vo
 	const pollIntervalMs = Number(options.pollInterval ?? "3000");
 	if (!Number.isInteger(pollIntervalMs) || pollIntervalMs < 500) {
 		throw usageError("--poll-interval must be at least 500 milliseconds.");
+	}
+	const envKey = process.env[GATEWAY_KEY_ENV];
+	if (envKey !== undefined && envKey.length < MIN_ENV_KEY_CHARS) {
+		throw usageError(
+			`${GATEWAY_KEY_ENV} must be at least ${MIN_ENV_KEY_CHARS} characters, such as the output of: openssl rand -base64 32`,
+		);
 	}
 	const gateway = await startGateway({
 		profile: profileName,

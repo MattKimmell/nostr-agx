@@ -392,7 +392,8 @@ agx gateway key revoke <id>         # a running gateway refuses it at once
 ```
 
 Every route but `GET /v1/health` needs `Authorization: Bearer <key>`. `AGX_GATEWAY_KEY` is
-accepted as a key too, for a container whose secrets come from its environment. The gateway
+accepted as a key too, for a container whose secrets come from its environment; it must be at
+least 32 characters (`openssl rand -base64 32`). The gateway
 listens on `127.0.0.1` unless told otherwise; publish it at an `https://` URL through a reverse
 proxy or tunnel, because the key and every task payload cross that connection.
 
@@ -417,14 +418,18 @@ no reply and no receipt, and nothing of it reaches any webhook. Options: `includ
 (messages and receipts from anyone, marked `allowed: false`), `maxTaskAgeSec` (ignore older task
 requests; default 600), `resultTimeoutSec` (default 120) and `advertise` (list the capabilities on
 the agent's card). Subscriptions are kept on disk, with their signing secrets, and survive a
-restart.
+restart. A webhook URL may point at this machine or a private network, but not at a link-local,
+multicast or unspecified address, such as a cloud metadata service.
 
 - **A task** is POSTed to the newest subscription that serves its capability and allows its
   sender, and the webhook's answer is the result: a `2xx` JSON body goes back to the requester. A
-  webhook that cannot be reached, or answers `404` or `410`, is skipped for the next older one
-  (a test webhook n8n has dropped, for instance). Any other answer reaches the requester as
-  `handler failed`, and a webhook still busy after `resultTimeoutSec` as "the workflow did not
-  finish in time". Tasks are handled one at a time.
+  webhook nobody could connect to, or that answers `404` or `410`, is skipped for the next older
+  one (a test webhook n8n has dropped, for instance). Any other answer, or a connection that broke
+  off, reaches the requester as `handler failed`, and a webhook still busy after
+  `resultTimeoutSec` as "the workflow did not finish in time". Tasks are handled one at a time,
+  and at most once: a task is recorded as handled before its webhook gets it, so if the gateway
+  stops or crashes while the workflow runs, the requester gets no result — its timeout covers
+  that — and the workflow is not run again.
 - **A message or receipt** is POSTed to every subscription that wants it, in the background, and
   retried three times over about 40 seconds when the webhook is unreachable or answers `429`,
   `502`, `503` or `504`.

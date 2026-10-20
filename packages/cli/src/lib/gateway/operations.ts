@@ -15,6 +15,7 @@ import {
 	resolvePeerRelays,
 	toNpub,
 } from "@nostr-agx/nostr";
+import type { NewOutboundMessage } from "../store/types.js";
 import { ApiError, integer, isRecord, text } from "./http.js";
 import type { Requester } from "./requester.js";
 
@@ -39,6 +40,8 @@ export interface OperationDeps {
 	transport: NostrTransport;
 	requester: Requester;
 	guard: AutoReplyGuard;
+	/** Keeps a sent message in the profile's history, as `agx send` does. */
+	recordSent?: (message: NewOutboundMessage) => void;
 }
 
 function body(value: unknown): Record<string, unknown> {
@@ -158,11 +161,12 @@ export async function sendMessage(deps: OperationDeps, input: unknown): Promise<
 	if (admission.refused !== null) {
 		throw new ApiError(429, "loop_protection", "Automated reply not sent (loop protection)", `Not sent because ${admission.refused}`);
 	}
+	const subject = text(req.subject).trim() || null;
 	let res: Awaited<ReturnType<NostrTransport["publishMessage"]>>;
 	try {
 		res = await deps.transport.publishMessage(to, {
 			text: messageText,
-			subject: text(req.subject).trim() || null,
+			subject,
 			contextId,
 			contentType: DEFAULT_CONTENT_TYPE,
 			// Declared only on an automated reply; 0 is the same as absent.
@@ -190,6 +194,15 @@ export async function sendMessage(deps: OperationDeps, input: unknown): Promise<
 				: `No relay accepted the message: ${detail}`,
 		);
 	}
+	deps.recordSent?.({
+		id: res.eventId,
+		peer: toNpub(to),
+		subject,
+		contextId: res.contextId ?? contextId,
+		text: messageText,
+		at: new Date().toISOString(),
+		deliveryStatus: "sent",
+	});
 	return {
 		to: toNpub(to),
 		eventId: res.eventId,
