@@ -4,10 +4,12 @@
  *
  *   pnpm build && node scripts/check-packages.mjs
  *
- * Catches the two mistakes that are invisible until someone installs a release:
+ * Catches the mistakes that are invisible until someone installs a release:
  * a tarball without its license (the manifest's `license` field is not a
- * license), and a `workspace:` version left in a published manifest (only
- * `pnpm publish` / `pnpm pack` rewrite those; `npm publish` does not).
+ * license), a `workspace:` version left in a published manifest (only
+ * `pnpm publish` / `pnpm pack` rewrite those; `npm publish` does not), and an
+ * n8n package that does not ship a node or credential its manifest tells n8n
+ * to load.
  */
 import { spawnSync } from "node:child_process";
 import { mkdtempSync, readdirSync, rmSync } from "node:fs";
@@ -19,6 +21,7 @@ const REQUIRED = {
 	core: ["package.json", "README.md", "LICENSE", "LICENSE-SPEC", "SPEC.md"],
 	nostr: ["package.json", "README.md", "LICENSE"],
 	cli: ["package.json", "README.md", "LICENSE"],
+	"n8n-nodes-agx": ["package.json", "README.md", "LICENSE"],
 };
 
 const out = mkdtempSync(join(tmpdir(), "check-packages-"));
@@ -54,6 +57,18 @@ try {
 		).stdout;
 		if (manifest.includes("workspace:")) {
 			problems.push(`${tarball}: package.json still contains a workspace: version`);
+		}
+		let n8n;
+		try {
+			n8n = JSON.parse(manifest).n8n;
+		} catch {
+			problems.push(`${tarball}: package.json could not be read from the tarball`);
+			continue;
+		}
+		for (const file of [...(n8n?.nodes ?? []), ...(n8n?.credentials ?? [])]) {
+			if (!files.has(file)) {
+				problems.push(`${tarball}: missing ${file}, which n8n is told to load`);
+			}
 		}
 		console.log(`${tarball}: ${files.size - 1} files`);
 	}

@@ -1,4 +1,4 @@
-import { AgxPublicError } from "./errors";
+import { AgxPublicError, AgxTaskDeclined } from "./errors";
 import { randomId } from "./id";
 import { type AgxLogger, noopLogger } from "./logger";
 import { InMemorySeenStore, type SeenStore } from "./seen-store";
@@ -31,7 +31,7 @@ import {
  */
 
 /** A capability handler. Returns the task result (→ `completed`); throwing →
- * `failed`. */
+ * `failed`, except {@link AgxTaskDeclined}, which sends nothing back. */
 export type TaskHandler<Payload = unknown, Output = unknown> = (
 	task: Task<Payload>,
 ) => Output | Promise<Output>;
@@ -40,6 +40,11 @@ export type TaskHandler<Payload = unknown, Output = unknown> = (
 export interface AgxAuthorizeContext {
 	from: string;
 	capability: string;
+	/** The request's replay key, as {@link Task.eventId} — for a host that keeps
+	 * its own record of handled tasks and can turn one down before its receipt. */
+	eventId?: string;
+	/** The transport envelope's id, when it differs from `eventId`. */
+	transportId?: string;
 }
 
 export type AgxAuthorize = (
@@ -66,6 +71,12 @@ export interface AgxClientOptions {
 	 * messages). Dispatched at-most-once per receipt via the SeenStore; throwing
 	 * holds the cursor for a retry next poll. */
 	onReceipt?: (receipt: AgxIncomingReceipt) => void | Promise<void>;
+	/** Host filter, consulted before anything else is done with an inbound event:
+	 * one it returns true for is recorded as seen and never dispatched — no
+	 * authorization, no receipt, no handler, no `onMessage`/`onReceipt`. For
+	 * events the host has decided never to act on, such as ones dated before it
+	 * started listening. Tell a receipt from a message by its `receipt` field. */
+	ignore?: (event: AgxIncomingMessage | AgxIncomingReceipt) => boolean;
 	/** Default `request()` timeout in ms (default 30000; 0 disables). */
 	requestTimeoutMs?: number;
 	/** Poll-overlap in seconds (replay-safe redelivery of late events; default 120). */
@@ -92,14 +103,18 @@ interface Pending {
 }
 
 const DEFAULT_REQUEST_TIMEOUT_MS = 30_000;
-const DEFAULT_POLL_OVERLAP_SEC = 120;
+/** Default {@link AgxClientOptions.pollOverlapSec}. Exported for hosts that keep
+ * their own replay records and must know how far back a poll reaches. */
+export const DEFAULT_POLL_OVERLAP_SEC = 120;
 const DEFAULT_POLL_INTERVAL_MS = 3_000;
 /** Default cap on failed dispatch attempts before an event is dead-lettered. */
 const DEFAULT_MAX_DISPATCH_ATTEMPTS = 10;
 /** Reject events dated further than this ahead of now — `createdAt` is
  * sender-declared, and a future-dated event must never advance the cursor (that
- * would freeze the inbox forever). Mirrors the host ingest guard. */
-const MAX_FUTURE_SKEW_SEC = 300;
+ * would freeze the inbox forever). Mirrors the host ingest guard. Exported, like
+ * {@link DEFAULT_POLL_OVERLAP_SEC}, for hosts that keep their own replay records:
+ * an event dispatched at time `t` is dated no later than `t` plus this. */
+export const MAX_FUTURE_SKEW_SEC = 300;
 
 export class AgxClient {
 	private readonly transport: AgxTransport;
@@ -115,6 +130,9 @@ export class AgxClient {
 	private readonly onReceipt?: (
 		receipt: AgxIncomingReceipt,
 	) => void | Promise<void>;
+	private readonly ignore?: (
+		event: AgxIncomingMessage | AgxIncomingReceipt,
+	) => boolean;
 	private readonly requestTimeoutMs: number;
 	private readonly pollOverlapSec: number;
 	private readonly maxDispatchAttempts: number;
@@ -136,6 +154,7 @@ export class AgxClient {
 		this.identity = opts.identity;
 		this.onMessage = opts.onMessage;
 		this.onReceipt = opts.onReceipt;
+		this.ignore = opts.ignore;
 		this.requestTimeoutMs =
 			opts.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS;
 		this.pollOverlapSec = opts.pollOverlapSec ?? DEFAULT_POLL_OVERLAP_SEC;
@@ -432,8 +451,15 @@ export class AgxClient {
 			if (await skipDuplicate(msg)) {
 				continue;
 			}
+			let ignored = false;
 			try {
-				await this.dispatchMessage(msg);
+				// Inside the try: a host filter that throws is a failed dispatch
+				// (retried, then dead-lettered), not a pump that rejects at the same
+				// event on every poll.
+				ignored = this.ignore?.(msg) === true;
+				if (!ignored) {
+					await this.dispatchMessage(msg);
+				}
 			} catch (err) {
 				// A transient host error (e.g. a throwing onMessage) must not lose the
 				// message or block the rest of the batch: leave it UNSEEN, hold the
@@ -459,7 +485,9 @@ export class AgxClient {
 			// Record as processed only AFTER a successful dispatch.
 			await markSeen(msg);
 			attempted.set(msg.eventId, "done");
-			dispatched += 1;
+			if (!ignored) {
+				dispatched += 1;
+			}
 		}
 		// Receipts (a peer acking OUR outbound) share the same replay + cursor loop
 		// as messages, so a receipt-only poll window still advances the cursor and a
@@ -472,7 +500,9 @@ export class AgxClient {
 				continue;
 			}
 			try {
-				await this.onReceipt?.(receipt);
+				if (this.ignore?.(receipt) !== true) {
+					await this.onReceipt?.(receipt);
+				}
 			} catch (err) {
 				const deadLettered = await this.onDispatchFailure(
 					"receipt",
@@ -611,6 +641,8 @@ export class AgxClient {
 			denied = !(await this.authorize({
 				from: msg.from,
 				capability: env.capability,
+				eventId: msg.eventId,
+				transportId: msg.transportId,
 			}));
 			if (denied) {
 				this.log.info?.("AGX: task rejected by authorize", {
@@ -664,6 +696,9 @@ export class AgxClient {
 			payload: env.payload,
 			from: msg.from,
 			contextId: msg.contextId,
+			eventId: msg.eventId,
+			transportId: msg.transportId,
+			sentAt: msg.sentAt,
 		};
 		try {
 			const output = await handler(task);
@@ -672,6 +707,16 @@ export class AgxClient {
 				output,
 			});
 		} catch (err) {
+			if (err instanceof AgxTaskDeclined) {
+				// The host left this task to something else that will answer it: no
+				// result from here, and the pump records it as handled.
+				this.log.debug?.("AGX: task declined by its handler", {
+					taskId: env.taskId,
+					capability: env.capability,
+					reason: err.message,
+				});
+				return;
+			}
 			// Don't leak internal error detail across the trust boundary: a handler
 			// error is arbitrary code that may carry hostnames / table names / creds.
 			// Only an explicitly-public AgxPublicError message is forwarded; anything

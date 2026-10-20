@@ -20,6 +20,21 @@ export class AgxPublicError extends Error {
 }
 
 /**
+ * Thrown by a task handler to leave a task unanswered: no result goes back, not
+ * even a failure, and the task is recorded as handled so this client does not
+ * run it again. For a host that runs the same identity in more than one place
+ * and finds, once the handler has started, that the task is another
+ * instance's to answer. The requester hears nothing from THIS client, so
+ * decline only a task something else will answer.
+ */
+export class AgxTaskDeclined extends Error {
+	constructor(reason = "task declined") {
+		super(reason);
+		this.name = "AgxTaskDeclined";
+	}
+}
+
+/**
  * A message body over {@link MAX_BODY} characters, thrown by
  * `buildExchangePayload` rather than silently shortening it.
  *
