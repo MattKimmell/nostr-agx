@@ -376,6 +376,65 @@ it can never reach a real relay or API. It is not part of `test:unit`.
 
 | `agx serve [--handler <file>]` | run as an agent; `--handler` binds a real runtime; `--no-reply` / `--no-tasks` stop automatic answers; `--allowed-only` / `--full-ids` shape what inbound messages print |
 
+## Behind an HTTP API: `agx gateway`
+
+`agx gateway` runs this profile's agent behind an HTTP API, for a tool that can make HTTP calls
+and receive webhooks but cannot speak Nostr: n8n Cloud, through
+[`@nostr-agx/n8n-nodes-agx-gateway`](../n8n-nodes-agx-gateway), or Make, Zapier, or a script. The
+gateway holds the secret key and the profile lock, as `serve` does, and keeps the same cursor,
+replay store and message store, so `agx threads` shows what went through it.
+
+```sh
+agx gateway key new --label n8n     # an API key; shown once, kept only as a SHA-256 hash
+agx gateway                         # http://127.0.0.1:8787  (--host, --port, --poll-interval ms)
+agx gateway key list
+agx gateway key revoke <id>         # a running gateway refuses it at once
+```
+
+Every route but `GET /v1/health` needs `Authorization: Bearer <key>`. `AGX_GATEWAY_KEY` is
+accepted as a key too, for a container whose secrets come from its environment. The gateway
+listens on `127.0.0.1` unless told otherwise; publish it at an `https://` URL through a reverse
+proxy or tunnel, because the key and every task payload cross that connection.
+
+| Route | |
+| --- | --- |
+| `GET /v1/identity` | the agent's `npub`, `pubkey`, relays, organization and NIP-05 address |
+| `POST /v1/tasks` | `{ peer, capability, payload?, timeoutSec?, checkCard? }`: request a task and wait for its result, up to an hour (default 30 s) |
+| `POST /v1/messages` | `{ peer, text, subject?, contextId?, autoDepth?, maxAutoDepth?, maxPerConversation?, maxPerHour? }`: send a message; an automated reply (`autoDepth` above 0) is refused past 8 deep, 20 per conversation or 60 per agent per hour, unless those limits are given |
+| `GET /v1/agents/<npub>?capability=&verifyNip05=` | read an agent's card, and whether it advertises a capability |
+| `GET` / `POST /v1/subscriptions`, `GET` / `DELETE /v1/subscriptions/<id>` | the webhooks the gateway delivers to |
+
+An error is `{ "error": { "code", "message", "description"? } }` with a matching status: `504` for
+a task nobody answered — the usual sign that the agent has not allowed this one — and `401` for a
+missing or revoked key.
+
+### Subscriptions
+
+A subscription names a webhook URL, the `events` to deliver (`task`, `message`, `receipt`), the
+`capabilities` it serves, and who may reach it: `allowedPeers`, or `acceptAll`. The gateway, not
+the webhook, enforces those rules, default-deny: a task from an agent no subscription allows gets
+no reply and no receipt, and nothing of it reaches any webhook. Options: `includeUnlisted`
+(messages and receipts from anyone, marked `allowed: false`), `maxTaskAgeSec` (ignore older task
+requests; default 600), `resultTimeoutSec` (default 120) and `advertise` (list the capabilities on
+the agent's card). Subscriptions are kept on disk, with their signing secrets, and survive a
+restart.
+
+- **A task** is POSTed to the newest subscription that serves its capability and allows its
+  sender, and the webhook's answer is the result: a `2xx` JSON body goes back to the requester. A
+  webhook that cannot be reached, or answers `404` or `410`, is skipped for the next older one
+  (a test webhook n8n has dropped, for instance). Any other answer reaches the requester as
+  `handler failed`, and a webhook still busy after `resultTimeoutSec` as "the workflow did not
+  finish in time". Tasks are handled one at a time.
+- **A message or receipt** is POSTed to every subscription that wants it, in the background, and
+  retried three times over about 40 seconds when the webhook is unreachable or answers `429`,
+  `502`, `503` or `504`.
+
+Every delivery is signed with the subscription's secret, which `POST /v1/subscriptions` returns
+once: `x-agx-signature` is `v1=` and the hex HMAC-SHA256 of `"<x-agx-timestamp>.<body>"`. Check
+it over the exact bytes received, and refuse a timestamp more than a few minutes old, so a captured
+delivery cannot be replayed. `x-agx-subscription`, `x-agx-event` and `x-agx-delivery` name the
+subscription, the event type and the Nostr event.
+
 ## Local UI
 
 `agx ui` (agx 0.3.2 or later) opens a browser UI on your own machine for the conversations an assistant
@@ -513,6 +572,7 @@ not `public` — `doctor` names all three.
 | `agx serve [--handler <file>]` | run as an agent; `--handler` binds a real runtime; `--no-reply` / `--no-tasks` stop automatic answers; `--allowed-only` / `--full-ids` shape what inbound messages print |
 | `agx send <npub> "<msg>"` / `agx request <npub> <capability>` | talk to another agent |
 | `agx ui [--port n] [--no-open] [--compose <draft.json>] [--drafts <dir>]` | a local browser UI for your conversations (see [Local UI](#local-ui)) |
+| `agx gateway` / `agx gateway key new \| list \| revoke` | the agent behind an HTTP API with signed webhooks, for n8n Cloud and other HTTP tools (see [`agx gateway`](#behind-an-http-api-agx-gateway)) |
 | `agx relay` | a local NIP-01 relay |
 | `agx doctor` | preflight |
 
@@ -627,6 +687,9 @@ on their behalf.
   profiles/<name>/spool.d/            changes waiting for the lock holder: sends, held decisions, mark-read (transient)
   profiles/<name>/pending-login.json  an `agx login` waiting for approval (holds the device code)
   profiles/<name>/pending-login.lock  held while one process polls that code
+  profiles/<name>/gateway-keys.json   `agx gateway` API keys, as SHA-256 hashes
+  profiles/<name>/gateway-subscriptions.json
+                                      webhooks `agx gateway` delivers to, with their signing secrets
 ```
 
 `credentials.json` and `pending-login.json` are secrets: never paste, upload or

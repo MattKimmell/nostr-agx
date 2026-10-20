@@ -10,6 +10,7 @@
 
 export const AGX_CORE_VERSION = "0.4.0";
 
+export * from "./auto-reply-guard";
 export * from "./capability";
 export * from "./client";
 export * from "./errors";

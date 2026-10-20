@@ -1,0 +1,275 @@
+import { randomBytes } from "node:crypto";
+import { existsSync, readFileSync } from "node:fs";
+import { normalizePubkey } from "@nostr-agx/nostr";
+import { z } from "zod";
+import { gatewaySubscriptionsPath, writePrivateJson } from "../paths.js";
+
+/**
+ * Webhook subscriptions: where `agx gateway` delivers what arrives for this
+ * agent, and on whose behalf it answers task requests.
+ *
+ * A subscription carries the same rules the AGX Trigger node enforces, and the
+ * gateway — not the webhook — enforces them, so nothing reaches the webhook,
+ * and no delivery receipt goes out, for an agent the subscription does not
+ * allow. Authorization stays default-deny: no allowed agent and no `acceptAll`
+ * means no task is ever run.
+ *
+ * Kept in the profile directory with each one's signing secret, so they
+ * survive a restart: n8n registers a webhook once, when a workflow is turned
+ * on, and expects it to stay registered.
+ */
+
+export const SUBSCRIPTION_EVENTS = ["task", "message", "receipt"] as const;
+export type SubscriptionEvent = (typeof SUBSCRIPTION_EVENTS)[number];
+
+/** The longest capability name a task request may carry (`taskRequestSchema`). */
+const MAX_CAPABILITY_CHARS = 200;
+/** The most capabilities other agents accept on an Agent Card. */
+const MAX_CARD_CAPABILITIES = 64;
+/** How long the gateway holds a task open waiting for the webhook's answer. */
+export const MAX_RESULT_TIMEOUT_SEC = 3600;
+/** How far before a subscription was made a sender may date an event and
+ * still have it delivered: clock skew, or a test message sent just before. */
+export const START_GRACE_SEC = 300;
+
+const storedSchema = z.object({
+	id: z.string(),
+	secret: z.string(),
+	/** Unix seconds. Events dated before this, less the grace, are not delivered. */
+	createdAt: z.number(),
+	label: z.string().nullable(),
+	url: z.string(),
+	events: z.array(z.enum(SUBSCRIPTION_EVENTS)).min(1),
+	capabilities: z.array(z.string()),
+	acceptAll: z.boolean(),
+	/** Hex public keys. */
+	allowedPeers: z.array(z.string()),
+	includeUnlisted: z.boolean(),
+	/** Task requests sent longer ago than this are ignored, with no reply. 0: off. */
+	maxTaskAgeSec: z.number(),
+	resultTimeoutSec: z.number(),
+	advertise: z.boolean(),
+});
+const fileSchema = z.object({
+	version: z.literal(1),
+	subscriptions: z.array(storedSchema).default([]),
+});
+
+export type Subscription = z.infer<typeof storedSchema>;
+/** A subscription as the API shows it after creation: without its secret. */
+export type SubscriptionView = Omit<Subscription, "secret">;
+
+/** A rejected subscription request, with a message fit to show the user. */
+export class SubscriptionError extends Error {}
+
+const inputSchema = z.object({
+	url: z.string().max(2048),
+	label: z.string().max(200).nullish(),
+	events: z.array(z.enum(SUBSCRIPTION_EVENTS)).min(1).max(3),
+	capabilities: z.array(z.string().max(1000)).max(1000).default([]),
+	acceptAll: z.boolean().default(false),
+	allowedPeers: z.array(z.string().max(200)).max(10_000).default([]),
+	includeUnlisted: z.boolean().default(false),
+	maxTaskAgeSec: z.number().int().min(0).max(7 * 24 * 3600).default(600),
+	resultTimeoutSec: z.number().int().min(1).max(MAX_RESULT_TIMEOUT_SEC).default(120),
+	advertise: z.boolean().default(false),
+});
+
+function nowSec(): number {
+	return Math.floor(Date.now() / 1000);
+}
+
+/** Check and normalize a subscription request. Throws `SubscriptionError`. */
+export function parseSubscriptionInput(
+	body: unknown,
+): Omit<Subscription, "id" | "secret" | "createdAt"> {
+	const parsed = inputSchema.safeParse(body);
+	if (!parsed.success) {
+		const issue = parsed.error.issues[0];
+		throw new SubscriptionError(
+			`Invalid subscription: ${issue?.path.join(".") || "body"}: ${issue?.message ?? "malformed"}`,
+		);
+	}
+	const input = parsed.data;
+	let url: URL;
+	try {
+		url = new URL(input.url);
+	} catch {
+		throw new SubscriptionError(`Invalid subscription: url is not a URL: ${input.url}`);
+	}
+	if (url.protocol !== "https:" && url.protocol !== "http:") {
+		throw new SubscriptionError("Invalid subscription: url must be http(s)");
+	}
+	const events = [...new Set(input.events)];
+	const serveTasks = events.includes("task");
+	const capabilities = serveTasks
+		? [...new Set(input.capabilities.map((c) => c.trim()).filter(Boolean))]
+		: [];
+	if (serveTasks && capabilities.length === 0) {
+		throw new SubscriptionError("Name the capabilities this webhook serves, such as invoice.review");
+	}
+	// The client runs a handler for exactly the capability it was registered
+	// under, so `invoice.*` would be advertised and never served.
+	const wildcards = capabilities.filter((c) => c.includes("*"));
+	if (wildcards.length > 0) {
+		throw new SubscriptionError(`List each capability by name: ${wildcards.join(", ")} cannot be served`);
+	}
+	const tooLong = capabilities.filter((c) => c.length > MAX_CAPABILITY_CHARS);
+	if (tooLong.length > 0) {
+		throw new SubscriptionError(`Capability names can be at most ${MAX_CAPABILITY_CHARS} characters`);
+	}
+	if (input.advertise && capabilities.length > MAX_CARD_CAPABILITIES) {
+		throw new SubscriptionError(
+			`An Agent Card can list at most ${MAX_CARD_CAPABILITIES} capabilities, and this webhook serves ${capabilities.length}`,
+		);
+	}
+	const allowedPeers: string[] = [];
+	const invalid: string[] = [];
+	for (const entry of input.allowedPeers) {
+		const hex = normalizePubkey(entry.trim());
+		if (hex) {
+			allowedPeers.push(hex);
+		} else if (entry.trim()) {
+			invalid.push(entry.trim());
+		}
+	}
+	if (invalid.length > 0) {
+		throw new SubscriptionError(
+			`These are not npub1… keys or 64-character hex public keys: ${invalid.join(", ")}`,
+		);
+	}
+	const reachable =
+		input.acceptAll ||
+		allowedPeers.length > 0 ||
+		(!serveTasks && input.includeUnlisted);
+	if (!reachable) {
+		throw new SubscriptionError(
+			"No agent is allowed to reach this webhook: AGX denies everyone by default. Allow some agents, or accept all of them.",
+		);
+	}
+	return {
+		label: input.label ?? null,
+		url: url.toString(),
+		events,
+		capabilities,
+		acceptAll: input.acceptAll,
+		allowedPeers: [...new Set(allowedPeers)],
+		includeUnlisted: input.includeUnlisted,
+		maxTaskAgeSec: input.maxTaskAgeSec,
+		resultTimeoutSec: input.resultTimeoutSec,
+		advertise: input.advertise,
+	};
+}
+
+export function viewOf(subscription: Subscription): SubscriptionView {
+	const { secret: _secret, ...view } = subscription;
+	return view;
+}
+
+/** A subscription that would take an event, and whether it allows the sender. */
+export interface Recipient {
+	subscription: Subscription;
+	allowed: boolean;
+}
+
+export class SubscriptionStore {
+	private subscriptions: Subscription[];
+
+	constructor(private readonly profile: string) {
+		const path = gatewaySubscriptionsPath(profile);
+		if (!existsSync(path)) {
+			this.subscriptions = [];
+			return;
+		}
+		const parsed = fileSchema.safeParse(JSON.parse(readFileSync(path, "utf8")));
+		if (!parsed.success) {
+			throw new Error(`${path} is not a gateway subscription file this version can read`);
+		}
+		this.subscriptions = parsed.data.subscriptions;
+	}
+
+	private save(): void {
+		writePrivateJson(gatewaySubscriptionsPath(this.profile), {
+			version: 1,
+			subscriptions: this.subscriptions,
+		});
+	}
+
+	list(): Subscription[] {
+		return [...this.subscriptions];
+	}
+
+	get(id: string): Subscription | undefined {
+		return this.subscriptions.find((s) => s.id === id);
+	}
+
+	create(input: Omit<Subscription, "id" | "secret" | "createdAt">): Subscription {
+		const subscription: Subscription = {
+			...input,
+			id: `sub_${randomBytes(8).toString("hex")}`,
+			secret: randomBytes(32).toString("base64url"),
+			createdAt: nowSec(),
+		};
+		this.subscriptions.push(subscription);
+		this.save();
+		return subscription;
+	}
+
+	delete(id: string): boolean {
+		const kept = this.subscriptions.filter((s) => s.id !== id);
+		if (kept.length === this.subscriptions.length) {
+			return false;
+		}
+		this.subscriptions = kept;
+		this.save();
+		return true;
+	}
+
+	/** Every capability some subscription serves. */
+	capabilities(): string[] {
+		return [...new Set(this.subscriptions.flatMap((s) => s.capabilities))];
+	}
+
+	/** The capabilities the Agent Card lists: those of subscriptions that advertise. */
+	advertised(): string[] {
+		return [
+			...new Set(this.subscriptions.filter((s) => s.advertise).flatMap((s) => s.capabilities)),
+		].sort();
+	}
+
+	/**
+	 * The subscriptions that would run a task request for `capability` from
+	 * `from`, newest first: the newest is tried first, and an older one only when
+	 * its webhook cannot be reached (a test webhook n8n has dropped, say). With
+	 * `sentAt`, those for which the request is too old, or older than the
+	 * subscription, are left out.
+	 */
+	forTask(capability: string, from: string, sentAt?: number, now = nowSec()): Subscription[] {
+		return this.subscriptions
+			.filter(
+				(s) =>
+					s.events.includes("task") &&
+					s.capabilities.includes(capability) &&
+					(s.acceptAll || s.allowedPeers.includes(from)) &&
+					(sentAt === undefined ||
+						(sentAt >= s.createdAt - START_GRACE_SEC &&
+							(s.maxTaskAgeSec === 0 || now - sentAt <= s.maxTaskAgeSec))),
+			)
+			.sort((a, b) => b.createdAt - a.createdAt);
+	}
+
+	/** The subscriptions a message or receipt from `from`, dated `sentAt`, goes to. */
+	forEvent(kind: "message" | "receipt", from: string, sentAt: number): Recipient[] {
+		const out: Recipient[] = [];
+		for (const subscription of this.subscriptions) {
+			if (!subscription.events.includes(kind) || sentAt < subscription.createdAt - START_GRACE_SEC) {
+				continue;
+			}
+			const allowed = subscription.acceptAll || subscription.allowedPeers.includes(from);
+			if (allowed || subscription.includeUnlisted) {
+				out.push({ subscription, allowed });
+			}
+		}
+		return out;
+	}
+}

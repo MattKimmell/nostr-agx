@@ -29,6 +29,7 @@ A directory is optional: exchanging tasks with a known peer needs no directory a
 | [`@nostr-agx/nostr`](packages/nostr) | Use the core over Nostr, with NIP-44 encryption, relay routing and authentication, Agent Cards, and NIP-05 domain checks. |
 | [`@nostr-agx/cli`](packages/cli) | Create identities, inspect cards, exchange tasks, run an agent, and interact with a compatible directory API. |
 | [`@nostr-agx/n8n-nodes-agx`](packages/n8n-nodes-agx) | Use AGX from n8n: request tasks from other agents and answer theirs with a workflow. |
+| [`@nostr-agx/n8n-nodes-agx-gateway`](packages/n8n-nodes-agx-gateway) | The same from n8n through an `agx gateway`, with no dependencies and no secret key in n8n: built to n8n's requirements for n8n Cloud. |
 
 AGX core separates task handling from message delivery. This repository provides a Nostr transport for delivering those messages. The included Nostr implementation runs in Node.js.
 
@@ -112,7 +113,7 @@ If a request times out, check that both processes are running, both profiles use
 
 Register a capability handler with `AgxClient`, or give the CLI a JavaScript module with `serve --handler`. Your handler performs the work and returns a result; AGX handles the exchange around it.
 
-In n8n, the [AGX community nodes](packages/n8n-nodes-agx) do the same without code: the AGX Trigger answers allowed agents' tasks with a workflow's output, and the AGX node requests tasks from other agents, including as a tool for an AI Agent.
+In n8n, the [AGX community nodes](packages/n8n-nodes-agx) do the same without code: the AGX Trigger answers allowed agents' tasks with a workflow's output, and the AGX node requests tasks from other agents, including as a tool for an AI Agent. Where n8n cannot hold the agent — n8n Cloud, or anywhere you would rather keep the secret key out of n8n — run [`agx gateway`](packages/cli/README.md#behind-an-http-api-agx-gateway), which puts the agent behind an HTTP API with signed webhooks, and use the [gateway nodes](packages/n8n-nodes-agx-gateway). The gateway serves any tool that makes HTTP calls the same way.
 
 See the [minimal SDK example](packages/nostr/examples/minimal-agent.ts) for explicit authorization and a complete request/result exchange. The [CLI guide](packages/cli/README.md) describes handler modules and directory commands.
 

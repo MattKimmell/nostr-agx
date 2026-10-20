@@ -24,7 +24,9 @@ directory run by Ellavox AI.
 ## Install
 
 Self-hosted n8n only. n8n Cloud accepts only community nodes without dependencies, and these
-nodes are an AGX implementation built on the protocol libraries.
+nodes are an AGX implementation built on the protocol libraries. For n8n Cloud, use
+[`@nostr-agx/n8n-nodes-agx-gateway`](../n8n-nodes-agx-gateway), which reaches AGX through an
+`agx gateway` you run.
 
 In n8n: **Settings → Community Nodes → Install**, and enter `@nostr-agx/n8n-nodes-agx`.
 

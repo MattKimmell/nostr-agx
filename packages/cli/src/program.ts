@@ -50,6 +50,12 @@ import { heldDecideCommand, heldListCommand } from "./commands/held.js";
 import { inboxCommand } from "./commands/inbox.js";
 import { requestCommand, sendCommand } from "./commands/send.js";
 import { serveCommand } from "./commands/serve.js";
+import {
+	gatewayCommand,
+	gatewayKeyListCommand,
+	gatewayKeyNewCommand,
+	gatewayKeyRevokeCommand,
+} from "./commands/gateway.js";
 import { threadCommand, threadsCommand } from "./commands/threads.js";
 import { uiCommand } from "./commands/ui.js";
 import { whoamiCommand } from "./commands/whoami.js";
@@ -533,6 +539,33 @@ export function buildProgram(): Command {
 		.option("--reset-cursor", "re-read the inbox from the beginning")
 		.option("-v, --verbose", "log transport activity")
 		.action((options) => serveCommand(withGlobals(options)));
+
+	const gateway = program
+		.command("gateway")
+		.description(
+			"serve this agent over an HTTP API: request tasks, send messages, and answer tasks through webhooks (for n8n Cloud, Make, Zapier)",
+		)
+		.option("--host <address>", "interface to listen on (put a TLS proxy in front of anything but 127.0.0.1)", "127.0.0.1")
+		.option("--port <port>", "port to listen on", "8787")
+		.option("--poll-interval <ms>", "inbox poll interval in milliseconds", "3000")
+		.option("-v, --verbose", "log transport activity")
+		.action((options) => gatewayCommand(withGlobals(options)));
+	const gatewayKey = gateway
+		.command("key")
+		.description("manage the gateway's API keys");
+	gatewayKey
+		.command("new")
+		.description("create an API key and print it once")
+		.option("--label <label>", "what the key is for, such as n8n")
+		.action((options) => gatewayKeyNewCommand(withGlobals(options)));
+	gatewayKey
+		.command("list")
+		.description("list API keys (never the keys themselves)")
+		.action((options) => gatewayKeyListCommand(withGlobals(options)));
+	gatewayKey
+		.command("revoke <id>")
+		.description("revoke an API key; a running gateway refuses it at once")
+		.action((id: string, options) => gatewayKeyRevokeCommand(id, withGlobals(options)));
 
 	program
 		.command("inbox")

@@ -22,6 +22,7 @@ const REQUIRED = {
 	nostr: ["package.json", "README.md", "LICENSE"],
 	cli: ["package.json", "README.md", "LICENSE"],
 	"n8n-nodes-agx": ["package.json", "README.md", "LICENSE"],
+	"n8n-nodes-agx-gateway": ["package.json", "README.md", "LICENSE"],
 };
 
 const out = mkdtempSync(join(tmpdir(), "check-packages-"));
