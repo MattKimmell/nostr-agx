@@ -255,6 +255,62 @@ describe("AGX Trigger: task requests", () => {
 		expect(activeRun.emitted.length + testRun.emitted.length).toBe(1);
 	});
 
+	it("keeps serving after another instance takes a task it had already accepted", async () => {
+		const n8nAgent = newAgent(relay);
+		const requester = newAgent(relay);
+		const staticData: IDataObject = {};
+		const params = {
+			events: ["task"],
+			capabilities: "invoice.review",
+			allowedPeers: requester.publicKey,
+			options: { pollInterval: 1 },
+		};
+		const workflowId = "wf-lost-claim";
+		const activeRun = triggerContext({ credentials: n8nAgent.credentials, params, staticData, workflowId });
+		const testRun = triggerContext({
+			credentials: n8nAgent.credentials,
+			params,
+			staticData,
+			workflowId,
+			mode: "manual",
+		});
+		// The first instance to accept the task is held up sending its delivery
+		// receipt, so the other one takes the task in the meantime.
+		const publishReceipt = NostrTransport.prototype.publishReceipt;
+		vi.spyOn(NostrTransport.prototype, "publishReceipt").mockImplementationOnce(
+			async function (this: NostrTransport, ...args) {
+				await sleep(2500);
+				return publishReceipt.apply(this, args);
+			},
+		);
+		const instances = [
+			{ run: activeRun, response: await startTrigger(activeRun.ctx) },
+			{ run: testRun, response: await startTrigger(testRun.ctx) },
+		];
+		const client = await peerClient(relay, requester);
+		const first = client.request(n8nAgent.publicKey, "invoice.review", { n: 1 }, { timeoutMs: 20_000 });
+		const firstRun = pumpUntil(first, [client]);
+		const event = await waitFor(() => activeRun.emitted[0] ?? testRun.emitted[0]);
+		event.done?.resolve(finishedRun([{ n: 1 }]));
+		await expect(firstRun).resolves.toEqual({ n: 1 });
+		// Past the held-up receipt: the instance that lost the task has given it
+		// up by now.
+		await sleep(3000);
+		const winner = instances.find((i) => i.run.emitted.length === 1);
+		const loser = instances.find((i) => i.run.emitted.length === 0);
+		expect(winner && loser).toBeTruthy();
+
+		// With the winner gone, the instance that lost the first task serves the
+		// next one.
+		await winner?.response.closeFunction?.();
+		const second = client.request(n8nAgent.publicKey, "invoice.review", { n: 2 }, { timeoutMs: 20_000 });
+		const secondRun = pumpUntil(second, [client]);
+		const next = await waitFor(() => loser?.run.emitted[0]);
+		expect(next.json.payload).toEqual({ n: 2 });
+		next.done?.resolve(finishedRun([{ n: 2 }]));
+		await expect(secondRun).resolves.toEqual({ n: 2 });
+	});
+
 	it("ignores a task request too old to run, with no reply", async () => {
 		const n8nAgent = newAgent(relay);
 		const requester = newAgent(relay);
@@ -560,6 +616,23 @@ describe("AGX Trigger: configuration", () => {
 			params: { events: ["task"], capabilities: "invoice.*", acceptAll: true },
 		});
 		await expect(new AgxTrigger().trigger.call(ctx)).rejects.toThrow(/invoice\.\* cannot be served/);
+	});
+
+	it("refuses capabilities other agents would reject: a name over 200 characters, a card over 64", async () => {
+		const n8nAgent = newAgent(relay);
+		const long = triggerContext({
+			credentials: n8nAgent.credentials,
+			params: { events: ["task"], capabilities: `a.${"b".repeat(200)}`, acceptAll: true },
+		});
+		await expect(new AgxTrigger().trigger.call(long.ctx)).rejects.toThrow(/at most 200 characters/);
+		const many = Array.from({ length: 65 }, (_, i) => `cap.n${i}`).join(", ");
+		const advertised = triggerContext({
+			credentials: n8nAgent.credentials,
+			params: { events: ["task"], capabilities: many, acceptAll: true, options: { advertise: true } },
+		});
+		await expect(new AgxTrigger().trigger.call(advertised.ctx)).rejects.toThrow(
+			/at most 64 capabilities, and this workflow serves 65/,
+		);
 	});
 
 	it("refuses options an expression could set out of range", async () => {

@@ -8,7 +8,13 @@ import { identityFromCredentials, parseRelays, parseSecretKey } from "../nodes/s
 import { parseCapabilities, parsePeer, parsePeerList } from "../nodes/shared/peers";
 import { awaitTaskOutput, taskOutputFromRun } from "../nodes/shared/run-result";
 import { isoOrNull, numberOption } from "../nodes/shared/numbers";
-import { __resetLiveClaimsForTests, TriggerState } from "../nodes/shared/trigger-state";
+import { asText } from "../nodes/shared/text";
+import {
+	__resetLiveClaimsForTests,
+	MAX_CLAIMS,
+	PRUNE_STEP_SEC,
+	TriggerState,
+} from "../nodes/shared/trigger-state";
 import { finishedRun } from "./helpers";
 
 describe("credential parsing", () => {
@@ -144,6 +150,31 @@ describe("numberOption", () => {
 		expect(() => numberOption(1.5, "Depth", 0, { min: 0, max: 255, integer: true })).toThrow(
 			/whole number/,
 		);
+	});
+
+	it("rejects what Number() would quietly read as 0: a blank string, false, an empty array", () => {
+		for (const value of [" ", false, [], {}]) {
+			expect(() => numberOption(value, "Depth", 3, { min: 0, max: 255, integer: true })).toThrow(
+				/Depth must be a whole number/,
+			);
+		}
+	});
+});
+
+describe("asText", () => {
+	it("reads what an expression hands a text field: numbers, booleans, objects", () => {
+		expect(asText(12345)).toBe("12345");
+		expect(asText(true)).toBe("true");
+		expect(asText({ a: 1 })).toBe('{"a":1}');
+		expect(asText(undefined)).toBe("");
+		expect(asText(null)).toBe("");
+		expect(asText("as is ")).toBe("as is ");
+	});
+
+	it("lets the list and key parsers take a non-string value without a TypeError", () => {
+		expect(parseCapabilities(12)).toEqual(["12"]);
+		expect(parsePeerList(undefined)).toEqual([]);
+		expect(() => parsePeer(42)).toThrow(/not "42"/);
 	});
 });
 
@@ -314,13 +345,48 @@ describe("TriggerState", () => {
 		// A cursor that moved on by the full lookback (backdate + overlap + skew)
 		// still reaches it...
 		state.setCursor(now + lookback);
-		state.tryClaim(["new"], now + 10);
+		state.tryClaim(["new"], now + lookback);
 		expect(state.isClaimed("old")).toBe(true);
-		// ...one second further cannot.
+		// ...and once it is out of reach, it goes at the next prune, which waits
+		// for the horizon to move on by a step rather than running on every claim.
 		state.setCursor(now + lookback + 1);
-		state.tryClaim(["newer"], now + 20);
+		state.tryClaim(["newer"], now + lookback + 1);
+		expect(state.isClaimed("old")).toBe(true);
+		state.setCursor(now + lookback + PRUNE_STEP_SEC);
+		state.tryClaim(["newest"], now + lookback + PRUNE_STEP_SEC);
 		expect(state.isClaimed("old")).toBe(false);
 		expect(state.isClaimed("new")).toBe(true);
+		expect(state.isClaimed("newest")).toBe(true);
+	});
+
+	it("past the cap, drops the oldest claims and ignores what they covered instead of running it again", () => {
+		const data: IDataObject = {};
+		const state = active(data);
+		const total = MAX_CLAIMS + 1;
+		for (let i = 0; i < total; i += 1) {
+			expect(state.tryClaim([`e${i}`], now + i)).toBe(true);
+		}
+		// Down to 90% of the cap, oldest first, so the next prune is not one
+		// claim away.
+		const dropped = total - Math.floor(MAX_CLAIMS * 0.9);
+		expect(state.isClaimed(`e${dropped - 1}`)).toBe(false);
+		expect(state.isClaimed(`e${dropped}`)).toBe(true);
+		// An event dated no later than a dropped claim (plus clock skew) is
+		// before `since` now, so the trigger ignores it.
+		const since = now + dropped - 1 + 300 + 1;
+		expect(state.since).toBe(since);
+		__resetLiveClaimsForTests();
+		expect(active(data).since).toBe(since);
+	});
+
+	it("saves a test run's claims when the trigger restarts in the same process", () => {
+		const data: IDataObject = {};
+		active(data);
+		TriggerState.forManualRun(data, scope, now).tryClaim(["from-test"], now);
+		// A save restarts the active trigger before it claimed anything itself.
+		active(data);
+		__resetLiveClaimsForTests();
+		expect(active(data).isClaimed("from-test")).toBe(true);
 	});
 
 	it("does not prune by the wall clock: a quiet week does not forget claims the saved cursor still reaches", () => {

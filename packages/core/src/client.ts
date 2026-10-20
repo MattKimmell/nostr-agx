@@ -1,4 +1,4 @@
-import { AgxPublicError } from "./errors";
+import { AgxPublicError, AgxTaskDeclined } from "./errors";
 import { randomId } from "./id";
 import { type AgxLogger, noopLogger } from "./logger";
 import { InMemorySeenStore, type SeenStore } from "./seen-store";
@@ -31,7 +31,7 @@ import {
  */
 
 /** A capability handler. Returns the task result (→ `completed`); throwing →
- * `failed`. */
+ * `failed`, except {@link AgxTaskDeclined}, which sends nothing back. */
 export type TaskHandler<Payload = unknown, Output = unknown> = (
 	task: Task<Payload>,
 ) => Output | Promise<Output>;
@@ -40,6 +40,11 @@ export type TaskHandler<Payload = unknown, Output = unknown> = (
 export interface AgxAuthorizeContext {
 	from: string;
 	capability: string;
+	/** The request's replay key, as {@link Task.eventId} — for a host that keeps
+	 * its own record of handled tasks and can turn one down before its receipt. */
+	eventId?: string;
+	/** The transport envelope's id, when it differs from `eventId`. */
+	transportId?: string;
 }
 
 export type AgxAuthorize = (
@@ -446,13 +451,15 @@ export class AgxClient {
 			if (await skipDuplicate(msg)) {
 				continue;
 			}
-			if (this.ignore?.(msg)) {
-				await markSeen(msg);
-				attempted.set(msg.eventId, "done");
-				continue;
-			}
+			let ignored = false;
 			try {
-				await this.dispatchMessage(msg);
+				// Inside the try: a host filter that throws is a failed dispatch
+				// (retried, then dead-lettered), not a pump that rejects at the same
+				// event on every poll.
+				ignored = this.ignore?.(msg) === true;
+				if (!ignored) {
+					await this.dispatchMessage(msg);
+				}
 			} catch (err) {
 				// A transient host error (e.g. a throwing onMessage) must not lose the
 				// message or block the rest of the batch: leave it UNSEEN, hold the
@@ -478,7 +485,9 @@ export class AgxClient {
 			// Record as processed only AFTER a successful dispatch.
 			await markSeen(msg);
 			attempted.set(msg.eventId, "done");
-			dispatched += 1;
+			if (!ignored) {
+				dispatched += 1;
+			}
 		}
 		// Receipts (a peer acking OUR outbound) share the same replay + cursor loop
 		// as messages, so a receipt-only poll window still advances the cursor and a
@@ -490,13 +499,10 @@ export class AgxClient {
 			if (await skipDuplicate(receipt)) {
 				continue;
 			}
-			if (this.ignore?.(receipt)) {
-				await markSeen(receipt);
-				attempted.set(receipt.eventId, "done");
-				continue;
-			}
 			try {
-				await this.onReceipt?.(receipt);
+				if (this.ignore?.(receipt) !== true) {
+					await this.onReceipt?.(receipt);
+				}
 			} catch (err) {
 				const deadLettered = await this.onDispatchFailure(
 					"receipt",
@@ -635,6 +641,8 @@ export class AgxClient {
 			denied = !(await this.authorize({
 				from: msg.from,
 				capability: env.capability,
+				eventId: msg.eventId,
+				transportId: msg.transportId,
 			}));
 			if (denied) {
 				this.log.info?.("AGX: task rejected by authorize", {
@@ -699,6 +707,16 @@ export class AgxClient {
 				output,
 			});
 		} catch (err) {
+			if (err instanceof AgxTaskDeclined) {
+				// The host left this task to something else that will answer it: no
+				// result from here, and the pump records it as handled.
+				this.log.debug?.("AGX: task declined by its handler", {
+					taskId: env.taskId,
+					capability: env.capability,
+					reason: err.message,
+				});
+				return;
+			}
 			// Don't leak internal error detail across the trust boundary: a handler
 			// error is arbitrary code that may carry hostnames / table names / creds.
 			// Only an explicitly-public AgxPublicError message is forwarded; anything

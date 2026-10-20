@@ -58,7 +58,13 @@ try {
 		if (manifest.includes("workspace:")) {
 			problems.push(`${tarball}: package.json still contains a workspace: version`);
 		}
-		const n8n = JSON.parse(manifest).n8n;
+		let n8n;
+		try {
+			n8n = JSON.parse(manifest).n8n;
+		} catch {
+			problems.push(`${tarball}: package.json could not be read from the tarball`);
+			continue;
+		}
 		for (const file of [...(n8n?.nodes ?? []), ...(n8n?.credentials ?? [])]) {
 			if (!files.has(file)) {
 				problems.push(`${tarball}: missing ${file}, which n8n is told to load`);

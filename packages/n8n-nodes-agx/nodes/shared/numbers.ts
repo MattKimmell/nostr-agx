@@ -4,7 +4,8 @@
  * a negative number or NaN — and a timeout of 0 means "never" to `AgxClient`
  * and to `setTimeout`, while one past 2^31 ms fires at once. Empty means the
  * default; anything else outside `[min, max]` throws with a message fit to
- * show the user.
+ * show the user — including a blank string, `false` or `[]`, which `Number()`
+ * would quietly turn into 0.
  */
 export function numberOption(
 	value: unknown,
@@ -15,7 +16,12 @@ export function numberOption(
 	if (value === undefined || value === null || value === "") {
 		return fallback;
 	}
-	const n = typeof value === "number" ? value : Number(value);
+	const n =
+		typeof value === "number"
+			? value
+			: typeof value === "string" && value.trim() !== ""
+				? Number(value)
+				: Number.NaN;
 	if (
 		!Number.isFinite(n) ||
 		n < range.min ||

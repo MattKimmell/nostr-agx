@@ -1,9 +1,14 @@
 import { AgxClient, type AgxLogger } from "@nostr-agx/core";
+import { MAX_WRAP_BACKDATE_SEC } from "@nostr-agx/nostr";
 import { sleep } from "n8n-workflow";
 import { type AgxIdentity, createTransport } from "./identity";
 
 /** How often an identity with requests waiting polls its inbox for results. */
 const RESULT_POLL_MS = 1_000;
+
+function nowSec(): number {
+	return Math.floor(Date.now() / 1000);
+}
 
 /** Requesters by identity and relay set. */
 const requesters = new Map<string, Promise<Requester>>();
@@ -20,16 +25,24 @@ const requesters = new Map<string, Promise<Requester>>();
  * requests inside a client, by task id, and a client that is not waiting for a
  * result records it as handled anyway, so it would take another execution's.
  *
- * The client polls only while a request is waiting.
+ * The client polls only while a request is waiting, so its cursor stands
+ * still while nothing is. After an idle spell longer than the NIP-59 backdate,
+ * the next request starts a new client from now: the old one would first read
+ * everything dated since it last polled, and has nothing in its replay store
+ * that the window a new result can be dated in still needs.
  */
 export class Requester {
 	private waiting = 0;
 	private polling = false;
+	private client: AgxClient;
+	private lastPolledSec = nowSec();
 
 	private constructor(
-		private readonly client: AgxClient,
+		private readonly newClient: () => AgxClient,
 		private readonly logger: AgxLogger,
-	) {}
+	) {
+		this.client = newClient();
+	}
 
 	static for(identity: AgxIdentity, logger: AgxLogger): Promise<Requester> {
 		const key = `${identity.publicKey}|${[...identity.relays].sort().join(",")}`;
@@ -38,14 +51,16 @@ export class Requester {
 			requester = createTransport(identity, logger).then(
 				(transport) =>
 					new Requester(
-						new AgxClient({
-							transport,
-							logger,
-							// From now: the poll still reaches back the full NIP-59 backdate
-							// (two days), which is all a result sent from now on can be
-							// dated, instead of reading the whole retained inbox from zero.
-							startCursor: Math.floor(Date.now() / 1000),
-						}),
+						() =>
+							new AgxClient({
+								transport,
+								logger,
+								// From now: the poll still reaches back the full NIP-59
+								// backdate (two days), which is all a result sent from now on
+								// can be dated, instead of reading the whole retained inbox
+								// from zero.
+								startCursor: nowSec(),
+							}),
 						logger,
 					),
 			);
@@ -62,6 +77,10 @@ export class Requester {
 		payload: unknown,
 		timeoutMs: number,
 	): Promise<unknown> {
+		if (this.waiting === 0 && nowSec() - this.lastPolledSec > MAX_WRAP_BACKDATE_SEC) {
+			this.client = this.newClient();
+			this.lastPolledSec = nowSec();
+		}
 		// Registers the pending request before it returns, so the poll below
 		// cannot miss a result that arrives early.
 		const result = this.client.request(peer, capability, payload, { timeoutMs });
@@ -88,6 +107,7 @@ export class Requester {
 							error: error instanceof Error ? error.message : String(error),
 						}),
 					);
+					this.lastPolledSec = nowSec();
 				}
 			} finally {
 				this.polling = false;

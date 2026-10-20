@@ -59,8 +59,9 @@ export interface Task<Payload = unknown> {
 	contextId: string;
 	/** Durable id of the message the request arrived in — the replay key. A host
 	 * that keeps its own record of handled tasks (to survive a restart) keys it
-	 * on this. */
-	eventId: string;
+	 * on this. `AgxClient` always sets it; optional so code that builds a `Task`
+	 * itself (a handler's unit test, say) need not. */
+	eventId?: string;
 	/** The transport envelope's id, when it differs from `eventId`. */
 	transportId?: string;
 	/** When the sender says it sent the request (unix seconds), if the transport

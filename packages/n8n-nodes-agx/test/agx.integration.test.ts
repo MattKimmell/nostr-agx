@@ -1,8 +1,11 @@
 import { AgxPublicError } from "@nostr-agx/core";
-import { localSigner, NostrTransport, toNpub } from "@nostr-agx/nostr";
+import { localSigner, MAX_WRAP_BACKDATE_SEC, NostrTransport, toNpub } from "@nostr-agx/nostr";
+import { useWebSocketImplementation } from "nostr-tools/relay";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { Agx } from "../nodes/Agx/Agx.node";
 import { testAgxCredential } from "../nodes/shared/credential-test";
+import { agxLogger, identityFromCredentials } from "../nodes/shared/identity";
+import { Requester } from "../nodes/shared/requester";
 import {
 	executeContext,
 	newAgent,
@@ -255,6 +258,52 @@ describe("AGX node: Message → Send", () => {
 		});
 	});
 
+	it("takes a number from an expression as a Conversation ID or Subject", async () => {
+		const n8nAgent = newAgent(relay);
+		const reader = newAgent(relay);
+		const ctx = executeContext({
+			credentials: n8nAgent.credentials,
+			params: () => ({
+				resource: "message",
+				operation: "send",
+				peer: reader.publicKey,
+				text: 42,
+				options: { contextId: 12345, subject: 2026 },
+			}),
+		});
+		const [out] = await new Agx().execute.call(ctx);
+		expect(out[0].json).toMatchObject({ contextId: "12345", relaysAccepted: 1 });
+	});
+
+	it("refuses to send a message whose text came out empty", async () => {
+		const n8nAgent = newAgent(relay);
+		const reader = newAgent(relay);
+		const ctx = executeContext({
+			credentials: n8nAgent.credentials,
+			params: () => ({ resource: "message", operation: "send", peer: reader.publicKey, text: " " }),
+		});
+		await expect(new Agx().execute.call(ctx)).rejects.toThrow(/Text is empty/);
+	});
+
+	it("refuses to send when Automated Reply Depth is set but came out empty", async () => {
+		const n8nAgent = newAgent(relay);
+		const reader = newAgent(relay);
+		for (const autoDepth of [undefined, null, ""]) {
+			const ctx = executeContext({
+				credentials: n8nAgent.credentials,
+				params: () => ({
+					resource: "message",
+					operation: "send",
+					peer: reader.publicKey,
+					text: "automated",
+					// `{{ $json.replyAutoDepth }}` on an item that lost the field.
+					options: { autoDepth },
+				}),
+			});
+			await expect(new Agx().execute.call(ctx)).rejects.toThrow(/Automated Reply Depth is empty/);
+		}
+	});
+
 	it("counts each new conversation on its own when no Conversation ID is given", async () => {
 		const n8nAgent = newAgent(relay);
 		const reader = newAgent(relay);
@@ -382,6 +431,31 @@ describe("AGX node: Agent", () => {
 		expect(out[0].json).toMatchObject({ nip05: "agent@localhost", nip05Verified: null });
 	});
 
+	it("reads a card on a runtime with no global WebSocket, as its first relay call", async () => {
+		const n8nAgent = newAgent(relay);
+		const reviewer = newAgent(relay);
+		const peer = await peerClient(relay, reviewer, { authorize: "accept-all" });
+		peer.handle("x.y", () => ({}));
+		await peer.start({ pollIntervalMs: 0 });
+		await peer.stop();
+		// Node.js 20 in a fresh process: no global WebSocket, and nothing has
+		// pointed nostr-tools at `ws` yet.
+		const global = globalThis as { WebSocket?: unknown };
+		const original = global.WebSocket;
+		useWebSocketImplementation(undefined);
+		delete global.WebSocket;
+		try {
+			const ctx = executeContext({
+				credentials: n8nAgent.credentials,
+				params: () => ({ resource: "agent", operation: "getCard", peer: reviewer.publicKey }),
+			});
+			const [out] = await new Agx().execute.call(ctx);
+			expect(out[0].json).toMatchObject({ found: true, capabilities: ["x.y"] });
+		} finally {
+			global.WebSocket = original;
+		}
+	});
+
 	it("says when there is no card, rather than failing", async () => {
 		const n8nAgent = newAgent(relay);
 		const stranger = newAgent(relay);
@@ -435,5 +509,30 @@ describe("credential test", () => {
 		});
 		expect(unreachable).toMatchObject({ status: "Error" });
 		expect(unreachable.message).toMatch(/No relay answered/);
+	});
+});
+
+describe("Task → Request's shared client", () => {
+	it("starts a new client after an idle spell longer than the poll lookback, and keeps it otherwise", async () => {
+		const agent = newAgent(relay);
+		const requester = await Requester.for(
+			identityFromCredentials(agent.credentials),
+			agxLogger(quietLogger),
+		);
+		const internals = requester as unknown as {
+			client: unknown;
+			lastPolledSec: number;
+			polling: boolean;
+		};
+		const nobody = newAgent(relay).publicKey;
+		const first = internals.client;
+		await expect(requester.request(nobody, "x.y", {}, 1500)).rejects.toThrow(/timed out/);
+		await waitFor(() => !internals.polling);
+		expect(internals.client).toBe(first);
+		// Idle for longer than a result can be backdated: the old client's cursor
+		// would make the next poll read everything since.
+		internals.lastPolledSec -= MAX_WRAP_BACKDATE_SEC + 60;
+		await expect(requester.request(nobody, "x.y", {}, 1500)).rejects.toThrow(/timed out/);
+		expect(internals.client).not.toBe(first);
 	});
 });

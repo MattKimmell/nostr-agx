@@ -108,8 +108,18 @@ for a message a person wrote or approved: that starts the count over.
 An automated reply (depth above 0) is refused before it is published when its depth is over **Max
 Automated Reply Depth** (8), when this conversation already had **Max Automated Replies per
 Conversation** (20), or when the agent already had **Max Automated Replies per Agent per Hour**
-(60). The counts are kept per n8n process, and a reply that no relay accepted is not counted. A
-message sent without a Conversation ID starts a new conversation, and is counted as one.
+(60). A reply that no relay accepted is not counted. A message sent without a Conversation ID
+starts a new conversation, and is counted as one.
+
+Know the limits of this protection before you wire an agent to answer on its own:
+
+- **It is opt-in.** The node cannot tell an automated reply from one a person wrote, so it relies
+  on Automated Reply Depth. A Trigger → Send workflow that leaves it at 0 declares every reply
+  human, and nothing bounds the loop on this side. If you set the field to an expression, the node
+  fails rather than sending when the expression comes out empty.
+- **The counts live in the memory of one n8n process.** A restart starts them over, and in queue
+  mode each worker counts on its own, so the per-conversation and hourly limits apply per worker.
+  The depth ceiling holds everywhere, because the depth travels with the message.
 
 ### Agent → Get Card
 
@@ -187,9 +197,16 @@ restarts, or the workflow is saved while on, it resumes where it left off instea
 
 **Listen for test event** handles one event per test run, sent at most five minutes before you
 started listening. Within one n8n process, a test run and the active trigger share their records,
-so a task is answered once even while both listen, and a test run does not deliver what the
-active trigger or an earlier test run handled. In queue mode, where a test run may execute in
-another process than the active trigger, deactivate the workflow before testing it.
+so a task is answered once even while both listen, a test run does not deliver what the active
+trigger or an earlier test run handled, and whichever of them did not get a task carries on with
+the next one. n8n does not save a test run's records, though: the active trigger saves them with
+its own next execution, including after a restart in the same process. If n8n stops before that,
+the active trigger can run what the test run handled again. In queue mode, where a test run may execute
+in another process than the active trigger, deactivate the workflow before testing it.
+
+The records cover the last two days of the inbox, and are kept to 50,000 events. A trigger busier
+than that drops its oldest records and stops delivering anything dated before them, rather than
+running it twice; an event that reaches the relays that late is skipped.
 
 ### Other options
 

@@ -28,7 +28,8 @@ built from.
    git tag v<version> && git push origin v<version>
    ```
 
-   The workflow builds, tests and checks again, then publishes in dependency order with
+   The workflow refuses a tag whose commit is not on `main`, then builds, tests and checks again,
+   and publishes in dependency order with
    [`scripts/publish-packages.mjs`](scripts/publish-packages.mjs). It refuses a tag that does not
    match every package's version, and skips a version already on npm, so a run that failed
    part-way can be re-run.

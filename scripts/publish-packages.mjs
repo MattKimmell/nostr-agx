@@ -77,6 +77,9 @@ try {
 			cwd: join(root, "packages", pkg.dir),
 		});
 		const tarball = readdirSync(out).find((file) => !before.has(file));
+		if (!tarball) {
+			throw new Error(`pnpm pack wrote no tarball for ${label}`);
+		}
 		const publishArgs = ["publish", join(out, tarball), "--access", "public"];
 		// Provenance is attested by the CI provider, so only a real CI publish
 		// can ask for it.

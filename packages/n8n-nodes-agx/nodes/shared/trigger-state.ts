@@ -62,12 +62,28 @@ export interface TriggerScope {
 export const START_GRACE_SEC = 300;
 
 /** Memory and static-data guard. Pruning by the cursor (below) is the
- * retention policy; this only caps a pathological backlog. */
-const MAX_CLAIMS = 50_000;
+ * retention policy; this only caps a pathological backlog, and dropping a
+ * claim for it moves {@link StoredState.since} past it, so the event it
+ * covered is not delivered again. */
+export const MAX_CLAIMS = 50_000;
+/** Where a prune that hit {@link MAX_CLAIMS} brings the claims down to, so the
+ * next one is a tenth of the cap away rather than one claim. */
+const CLAIMS_AFTER_CAP = Math.floor(MAX_CLAIMS * 0.9);
+
+/** How far the prune horizon moves before claims are pruned again. A claim
+ * that can no longer be reached is dropped at most this much later; pruning on
+ * every claim would scan every claim on every emit. */
+export const PRUNE_STEP_SEC = 600;
 
 /** Claims every instance of a trigger node in this process sees, keyed by
- * {@link liveKey}. */
-const liveClaims = new Map<string, Record<string, number>>();
+ * {@link liveKey}. `unsaved` holds the ones a test run made, which only the
+ * active trigger can save: it takes them into its static data on its next
+ * claim. */
+interface SharedClaims {
+	all: Record<string, number>;
+	unsaved: Record<string, number>;
+}
+const liveClaims = new Map<string, SharedClaims>();
 
 function liveKey(scope: TriggerScope): string {
 	return `${scope.workflowId}:${scope.nodeId}:${scope.pubkey}`;
@@ -92,10 +108,10 @@ function isStoredState(value: unknown, pubkey: string): value is StoredState {
 	);
 }
 
-function liveClaimsFor(scope: TriggerScope): Record<string, number> {
+function liveClaimsFor(scope: TriggerScope): SharedClaims {
 	let live = liveClaims.get(liveKey(scope));
 	if (!live) {
-		live = {};
+		live = { all: {}, unsaved: {} };
 		liveClaims.set(liveKey(scope), live);
 	}
 	return live;
@@ -111,9 +127,12 @@ function mergeInto(
 }
 
 export class TriggerState {
+	/** The horizon claims were last pruned at, and how many were kept. */
+	private pruned = { horizon: Number.NEGATIVE_INFINITY, kept: 0 };
+
 	private constructor(
 		private readonly stored: StoredState,
-		private readonly live: Record<string, number>,
+		private readonly live: SharedClaims,
 		/** Marks the static data changed, so n8n saves it with the next emit;
 		 * undefined for a test run, which n8n does not save. */
 		private readonly markChanged?: () => void,
@@ -141,7 +160,10 @@ export class TriggerState {
 			stored.cursor = nowSec;
 		}
 		const live = liveClaimsFor(scope);
-		mergeInto(live, stored.claimed);
+		mergeInto(live.all, stored.claimed);
+		// What test runs claimed since the last save goes out with this one.
+		mergeInto(stored.claimed, live.unsaved);
+		live.unsaved = {};
 		// Assigning the key is what marks n8n's static data changed: it only
 		// proxies objects that existed when it was loaded, so mutating a nested
 		// object created since then would go unnoticed and unsaved.
@@ -164,7 +186,7 @@ export class TriggerState {
 		const live = liveClaimsFor(scope);
 		const saved = workflowStaticData[stateKey(scope)];
 		if (isStoredState(saved, scope.pubkey)) {
-			mergeInto(live, saved.claimed);
+			mergeInto(live.all, saved.claimed);
 		}
 		return new TriggerState(
 			{
@@ -196,7 +218,7 @@ export class TriggerState {
 	}
 
 	isClaimed(id: string): boolean {
-		return this.live[id] !== undefined || this.stored.claimed[id] !== undefined;
+		return this.live.all[id] !== undefined || this.stored.claimed[id] !== undefined;
 	}
 
 	/**
@@ -209,15 +231,19 @@ export class TriggerState {
 			return false;
 		}
 		for (const id of ids) {
-			this.live[id] = nowSec;
+			this.live.all[id] = nowSec;
 			this.stored.claimed[id] = nowSec;
+			if (!this.markChanged) {
+				this.live.unsaved[id] = nowSec;
+			}
 		}
 		if (this.markChanged) {
-			// Persist what other instances in this process claimed too (a test
-			// run, say), so a restart does not run those again either.
-			mergeInto(this.stored.claimed, this.live);
+			// Persist what test runs claimed too, so a restart does not run those
+			// again either.
+			mergeInto(this.stored.claimed, this.live.unsaved);
+			this.live.unsaved = {};
 		}
-		this.prune();
+		this.prune(ids.length);
 		this.markChanged?.();
 		return true;
 	}
@@ -232,27 +258,53 @@ export class TriggerState {
 	 * claim that cursor's window can reach. The in-memory claims are pruned by
 	 * the same horizon, from whichever instance is claiming; an active instance
 	 * whose cursor is older still checks its own saved claims.
+	 *
+	 * Runs once the horizon has moved {@link PRUNE_STEP_SEC} or the claims may
+	 * be over {@link MAX_CLAIMS}, not on every claim. Over the cap, the oldest
+	 * claims go (down to 90% of it), and `since` moves past them: an event's sender dates it no
+	 * later than when it was claimed (plus skew), so an event a dropped claim
+	 * covered is now ignored rather than run again.
 	 */
-	private prune(): void {
+	private prune(added: number): void {
 		const horizon =
 			this.stored.cursor -
 			DEFAULT_POLL_OVERLAP_SEC -
 			MAX_WRAP_BACKDATE_SEC -
 			MAX_FUTURE_SKEW_SEC;
-		for (const claims of [this.stored.claimed, this.live]) {
+		if (
+			horizon - this.pruned.horizon < PRUNE_STEP_SEC &&
+			this.pruned.kept + added <= MAX_CLAIMS
+		) {
+			this.pruned.kept += added;
+			return;
+		}
+		let kept = 0;
+		for (const claims of [this.stored.claimed, this.live.all, this.live.unsaved]) {
 			for (const [id, at] of Object.entries(claims)) {
 				if (at < horizon) {
 					delete claims[id];
 				}
 			}
-			const kept = Object.entries(claims);
-			if (kept.length > MAX_CLAIMS) {
-				kept.sort((a, b) => a[1] - b[1]);
-				for (const [id] of kept.slice(0, kept.length - MAX_CLAIMS)) {
+			const remaining = Object.entries(claims);
+			if (remaining.length > MAX_CLAIMS) {
+				remaining.sort((a, b) => a[1] - b[1]);
+				const dropped = remaining.slice(0, remaining.length - CLAIMS_AFTER_CAP);
+				for (const [id] of dropped) {
 					delete claims[id];
 				}
+				if (claims === this.stored.claimed) {
+					const newestDropped = dropped[dropped.length - 1][1];
+					this.stored.since = Math.max(
+						this.stored.since,
+						newestDropped + MAX_FUTURE_SKEW_SEC + 1,
+					);
+				}
+				kept = Math.max(kept, CLAIMS_AFTER_CAP);
+			} else {
+				kept = Math.max(kept, remaining.length);
 			}
 		}
+		this.pruned = { horizon, kept };
 	}
 
 	/** The replay store to give `AgxClient`: claimed ids durably, the rest in

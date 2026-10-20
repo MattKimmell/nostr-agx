@@ -23,6 +23,7 @@ import {
 } from "../shared/auto-reply-guard";
 import { type AgxIdentity, agxLogger } from "../shared/identity";
 import { MAX_WAIT_SEC, numberOption } from "../shared/numbers";
+import { asText } from "../shared/text";
 import { parsePeer } from "../shared/peers";
 import { Requester } from "../shared/requester";
 
@@ -112,9 +113,9 @@ export async function requestTasks(
 	const requester = await Requester.for(identity, agxLogger(ctx.logger));
 
 	const request = async (i: number): Promise<IDataObject> => {
-		const peer = parsePeer(ctx.getNodeParameter("peer", i) as string);
+		const peer = parsePeer(ctx.getNodeParameter("peer", i));
 		const npub = toNpub(peer);
-		const capability = (ctx.getNodeParameter("capability", i) as string).trim();
+		const capability = asText(ctx.getNodeParameter("capability", i)).trim();
 		if (!capability) {
 			throw new NodeOperationError(ctx.getNode(), "Capability is empty", {
 				itemIndex: i,
@@ -240,19 +241,36 @@ export async function sendMessages(
 	identity: AgxIdentity,
 ): Promise<INodeExecutionData[]> {
 	return perItem(ctx, items, async (i) => {
-		const to = parsePeer(ctx.getNodeParameter("peer", i) as string);
-		const text = ctx.getNodeParameter("text", i) as string;
+		const to = parsePeer(ctx.getNodeParameter("peer", i));
+		const text = asText(ctx.getNodeParameter("text", i));
+		if (!text.trim()) {
+			throw new NodeOperationError(ctx.getNode(), "Text is empty", { itemIndex: i });
+		}
 		const options = ctx.getNodeParameter("options", i, {}) as {
 			autoDepth?: unknown;
-			contextId?: string;
+			contextId?: unknown;
 			maxAutoDepth?: unknown;
 			maxPerConversation?: unknown;
 			maxPerHour?: unknown;
-			subject?: string;
+			subject?: unknown;
 		};
 		// Checked rather than coerced: an expression that yields NaN must not
 		// quietly become depth 0, which would pass an automated reply off as one a
-		// person wrote and skip every loop bound below.
+		// person wrote and skip every loop bound below. Nor may one that yields
+		// nothing — `{{ $json.replyAutoDepth }}` after a node dropped the field —
+		// so a depth that was set but came out empty is an error, not the default.
+		if (
+			Object.hasOwn(options, "autoDepth") &&
+			(options.autoDepth === undefined ||
+				options.autoDepth === null ||
+				options.autoDepth === "")
+		) {
+			throw new NodeOperationError(ctx.getNode(), "Automated Reply Depth is empty", {
+				itemIndex: i,
+				description:
+					"Set it to the AGX Trigger's replyAutoDepth for an automated reply, or to 0 for a message a person wrote. If it is an expression, the field it reads is missing from this item.",
+			});
+		}
 		const depth = numberOption(options.autoDepth, "Automated Reply Depth", 0, {
 			min: 0,
 			max: 255,
@@ -281,7 +299,7 @@ export async function sendMessages(
 		// A new conversation gets its id here rather than from the transport, so
 		// the guard counts the conversation this message really starts — not one
 		// shared bucket for every send that left the field empty.
-		const contextId = options.contextId?.trim() || randomId();
+		const contextId = asText(options.contextId).trim() || randomId();
 		if (contextId.length > MAX_CONTEXT_ID) {
 			throw new NodeOperationError(
 				ctx.getNode(),
@@ -306,7 +324,7 @@ export async function sendMessages(
 		try {
 			res = await transport.publishMessage(to, {
 				text,
-				subject: options.subject?.trim() || null,
+				subject: asText(options.subject).trim() || null,
 				contextId,
 				contentType: DEFAULT_CONTENT_TYPE,
 				// Declared only on an automated reply; 0 is the same as absent.
@@ -370,9 +388,9 @@ export async function getCards(
 	identity: AgxIdentity,
 ): Promise<INodeExecutionData[]> {
 	return perItem(ctx, items, async (i) => {
-		const peer = parsePeer(ctx.getNodeParameter("peer", i) as string);
+		const peer = parsePeer(ctx.getNodeParameter("peer", i));
 		const options = ctx.getNodeParameter("options", i, {}) as {
-			capability?: string;
+			capability?: unknown;
 			verifyNip05?: boolean;
 		};
 		const [{ card, reachable }, relays] = await Promise.all([
@@ -398,7 +416,7 @@ export async function getCards(
 			card?.nip05 && options.verifyNip05 !== false
 				? await verifyNip05(card.nip05, peer)
 				: null;
-		const capability = options.capability?.trim();
+		const capability = asText(options.capability).trim();
 		return {
 			npub: toNpub(peer),
 			pubkey: peer,

@@ -2,6 +2,7 @@ import {
 	AgxClient,
 	type AgxIncomingMessage,
 	type AgxIncomingReceipt,
+	AgxTaskDeclined,
 	parseTaskEnvelope,
 	type Task,
 	TASK_CONTENT_TYPE,
@@ -39,6 +40,11 @@ interface TriggerOptions {
 	resultTimeout?: unknown;
 }
 
+/** The longest capability name a task request may carry (`taskRequestSchema`). */
+const MAX_CAPABILITY_CHARS = 200;
+/** The most capabilities other agents accept on an Agent Card. */
+const MAX_CARD_CAPABILITIES = 64;
+
 /** The done-promise `emit` takes: settled with the finished execution. */
 type DonePromise = Parameters<ITriggerFunctions["emit"]>[2];
 
@@ -46,13 +52,20 @@ function nowSec(): number {
 	return Math.floor(Date.now() / 1000);
 }
 
-/** What a handler returns when this trigger gives a task up: a promise that
- * never settles. `AgxClient` answers every task whose handler settles, so this
- * is the one way to leave a task to the trigger instance that does run it,
- * with no second (failed) result from this one. Once the trigger is
- * discarded, nothing references the promise or the pump waiting on it. */
-function giveUp(): Promise<never> {
-	return new Promise<never>(() => undefined);
+/** What a task handler throws to leave the task to another instance of this
+ * trigger. `AgxClient` catches it and sends nothing back, so unlike the node's
+ * other errors it never reaches n8n. */
+function leftToAnotherInstance(): AgxTaskDeclined {
+	return new AgxTaskDeclined("left to another instance of this trigger");
+}
+
+/** The ids an event is claimed by: its event id, and its envelope's when that
+ * differs. */
+function eventIds(event: { eventId?: string; transportId?: string }): string[] {
+	const ids = [event.eventId, event.transportId].filter(
+		(id): id is string => typeof id === "string" && id !== "",
+	);
+	return [...new Set(ids)];
 }
 
 /**
@@ -254,11 +267,11 @@ export class AgxTrigger implements INodeType {
 		try {
 			identity = identityFromCredentials(await this.getCredentials("agxApi"));
 			capabilities = serveTasks
-				? parseCapabilities(this.getNodeParameter("capabilities", "") as string)
+				? parseCapabilities(this.getNodeParameter("capabilities", ""))
 				: [];
 			allowed = acceptAll
 				? new Set()
-				: new Set(parsePeerList(this.getNodeParameter("allowedPeers", "") as string));
+				: new Set(parsePeerList(this.getNodeParameter("allowedPeers", "")));
 			resultTimeoutMs =
 				numberOption(options.resultTimeout, "Result Timeout (Seconds)", 120, {
 					min: 1,
@@ -297,6 +310,26 @@ export class AgxTrigger implements INodeType {
 				{
 					description:
 						"A request names one exact capability, so name each one this workflow serves, such as invoice.review, invoice.approve.",
+				},
+			);
+		}
+		// Limits other agents enforce: a request naming a longer capability is
+		// discarded as malformed, and a card listing more than 64 is rejected
+		// whole, so the agent would be advertised and never reached.
+		const tooLong = capabilities.filter((c) => c.length > MAX_CAPABILITY_CHARS);
+		if (tooLong.length > 0) {
+			throw new NodeOperationError(
+				node,
+				`Capability names can be at most ${MAX_CAPABILITY_CHARS} characters: ${tooLong.map((c) => `${c.slice(0, 40)}…`).join(", ")}`,
+			);
+		}
+		if (options.advertise === true && capabilities.length > MAX_CARD_CAPABILITIES) {
+			throw new NodeOperationError(
+				node,
+				`An Agent Card can list at most ${MAX_CARD_CAPABILITIES} capabilities, and this workflow serves ${capabilities.length}`,
+				{
+					description:
+						"Other agents reject a card with more. Split the capabilities across workflows with their own identities, or turn off Advertise Agent Card.",
 				},
 			);
 		}
@@ -354,7 +387,7 @@ export class AgxTrigger implements INodeType {
 		 * closed, the test run's slot is taken, or another instance of this trigger
 		 * (the one this replaced, the active one during a test) has it already. */
 		const emit = (json: IDataObject, ids: string[], done?: DonePromise): boolean => {
-			if (!canEmit() || !state.tryClaim(ids, nowSec())) {
+			if (ids.length === 0 || !canEmit() || !state.tryClaim(ids, nowSec())) {
 				return false;
 			}
 			slotTaken = true;
@@ -362,10 +395,6 @@ export class AgxTrigger implements INodeType {
 			this.emit([[{ json }]], undefined, done);
 			return true;
 		};
-		const eventIds = (event: { eventId: string; transportId?: string }) =>
-			event.transportId && event.transportId !== event.eventId
-				? [event.eventId, event.transportId]
-				: [event.eventId];
 
 		const runTask = async (task: Task): Promise<unknown> => {
 			// `authorize` reserved the test run's slot for this task; hand it to
@@ -389,10 +418,11 @@ export class AgxTrigger implements INodeType {
 				done,
 			);
 			if (!started) {
-				logger.debug?.("AGX Trigger: task left to another instance of this trigger", {
-					taskId: task.taskId,
-				});
-				return giveUp();
+				// No reply from here: the instance that has the task answers it, or —
+				// when this trigger closed — the one n8n starts in its place does,
+				// since the task is still unclaimed. Declining lets this client go on
+				// with the rest of its inbox.
+				throw leftToAnotherInstance();
 			}
 			return awaitTaskOutput(done.promise, {
 				...resultOptions,
@@ -432,8 +462,13 @@ export class AgxTrigger implements INodeType {
 			// A function rather than the "accept-all" sentinel even when every agent
 			// is accepted, because the trigger's own state gates it too. The explicit
 			// opt-in the SPEC asks for is the node's Accept All Agents switch.
-			authorize: ({ from }) => {
+			// A task another instance of this trigger has already taken is turned
+			// down here, before this one sends a second delivery receipt for it.
+			authorize: ({ from, eventId, transportId }) => {
 				if (!isAllowed(from) || !canEmit()) {
+					return false;
+				}
+				if (eventIds({ eventId, transportId }).some((id) => state.isClaimed(id))) {
 					return false;
 				}
 				slotTaken = true;

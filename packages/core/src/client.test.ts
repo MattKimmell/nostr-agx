@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { AgxClient } from "./client";
-import { AgxPublicError } from "./errors";
+import { AgxPublicError, AgxTaskDeclined } from "./errors";
 import { randomId } from "./id";
 import { encodeTaskEnvelope, parseTaskEnvelope } from "./task";
 import type {
@@ -1021,5 +1021,78 @@ describe("AgxClient gives a host what it needs to keep its own replay records", 
 		// Seen: the next poll does not ask again.
 		await bob.pump();
 		expect(ignore).toHaveBeenCalledTimes(3);
+	});
+
+	it("passes `authorize` the request's event id", async () => {
+		const authorize = vi.fn(() => true);
+		const alice = new AgxClient({ transport: bus.transport(ALICE) });
+		const bob = new AgxClient({ transport: bus.transport(BOB), authorize });
+		bob.handle("x.y", () => null);
+		void alice.request(BOB, "x.y", {}, { timeoutMs: 0 });
+		await new Promise((r) => setTimeout(r, 0));
+		const [request] = bus.inbox.get(BOB) ?? [];
+		await bob.pump();
+		expect(authorize).toHaveBeenCalledWith(
+			expect.objectContaining({ from: ALICE, capability: "x.y", eventId: request.eventId }),
+		);
+	});
+
+	it("sends nothing back for a task its handler declines, records it as handled, and goes on", async () => {
+		const alice = new AgxClient({ transport: bus.transport(ALICE) });
+		const bob = new AgxClient({
+			transport: bus.transport(BOB),
+			authorize: "accept-all",
+		});
+		const handler = vi.fn((task: { payload: unknown }) => {
+			if ((task.payload as { n: number }).n === 1) {
+				throw new AgxTaskDeclined("another instance has it");
+			}
+			return "answered";
+		});
+		bob.handle("x.y", handler);
+		void alice.request(BOB, "x.y", { n: 1 }, { timeoutMs: 0 });
+		const second = alice.request(BOB, "x.y", { n: 2 }, { timeoutMs: 0 });
+		await new Promise((r) => setTimeout(r, 0));
+		const { complete } = await bob.pump();
+		expect(complete).toBe(true);
+		const replies = (bus.inbox.get(ALICE) ?? []).map((m) => parseTaskEnvelope(m.text));
+		expect(replies).toEqual([expect.objectContaining({ t: "res", status: "completed", output: "answered" })]);
+		await alice.pump();
+		await expect(second).resolves.toBe("answered");
+		await bob.pump();
+		expect(handler).toHaveBeenCalledTimes(2);
+	});
+
+	it("retries, then dead-letters, an event whose `ignore` check throws, and still dispatches the rest", async () => {
+		const onMessage = vi.fn();
+		const bob = new AgxClient({
+			transport: bus.transport(BOB),
+			onMessage,
+			maxDispatchAttempts: 2,
+			ignore: (event) => {
+				if ("text" in event && event.text === "poison") {
+					throw new Error("filter broke");
+				}
+				return false;
+			},
+		});
+		for (const [text, messageId] of [["poison", "m1"], ["fine", "m2"]]) {
+			bus.pushMessage(BOB, {
+				from: ALICE,
+				text,
+				contextId: "c",
+				messageId,
+				subject: null,
+				autoDepth: null,
+				contentType: "application/a2a+json",
+			});
+		}
+		await expect(bob.pump()).resolves.toMatchObject({ complete: false });
+		expect(onMessage).toHaveBeenCalledTimes(1);
+		expect(onMessage).toHaveBeenCalledWith(expect.objectContaining({ text: "fine" }));
+		// Second failure hits the cap: dead-lettered, so the cursor can move on.
+		await expect(bob.pump()).resolves.toMatchObject({ complete: true });
+		await expect(bob.pump()).resolves.toMatchObject({ complete: true });
+		expect(onMessage).toHaveBeenCalledTimes(1);
 	});
 });

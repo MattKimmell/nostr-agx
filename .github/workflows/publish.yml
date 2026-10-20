@@ -28,6 +28,15 @@ jobs:
       id-token: write
     steps:
       - uses: actions/checkout@v4
+        with:
+          # Full history, so the next step can see main.
+          fetch-depth: 0
+      # Releases are cut from main (RELEASING.md): a version tag pushed on any
+      # other branch's commit is refused instead of published.
+      - name: Check the tag is on main
+        run: |
+          git fetch --no-tags origin main
+          git merge-base --is-ancestor "$GITHUB_SHA" origin/main
       - uses: pnpm/action-setup@v4
       - uses: actions/setup-node@v4
         with:
