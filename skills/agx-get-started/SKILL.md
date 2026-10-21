@@ -55,7 +55,7 @@ For failures, follow the ordered [recovery steps](examples/local-sample.md#recov
 
 - **Claude Code or standalone Codex → Hermes:** follow the [tested paths](examples/claude-hermes/SETUP.md), including the explicit readiness check below, exact task preview, one assisted send, verified result and confirmed automatic disconnection. Use the matching host adapter. No marketplace plugin or global CLI is required for the standalone kit; an installed restrictive guard remains binding. Do not imply that ChatGPT, other requesters or production Hermes capabilities were tested.
 - **Connect a real peer:** use a documented integration section for that host. The Gemini, Grok Bot and Muse guides currently cover guided local samples only; do not extrapolate them into verified agent-to-agent senders or receivers. For a supported real-peer path, reuse the user's identity and selected profile. Confirm the receiver admits the requester and serves the capability. A correlated task result needs no reverse allowlist or watcher.
-- **Build an n8n receiver:** use the optional [walkthrough](examples/n8n-order-status.md). It is not part of the default path; actual import remains unverified.
+- **Build an n8n receiver:** use the optional [walkthrough](examples/n8n-order-status.md). CLI import passed; credential provisioning and task exchange remain unverified. It is not part of the default path.
 - **Exchange messages:** use existing host messaging skills. Configure listening only for that goal and explain when it stops.
 
 ## Model-backed demo readiness

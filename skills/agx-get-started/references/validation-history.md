@@ -23,9 +23,17 @@ The October 21 review identified that the Hermes child still inherited `AGX_HOME
 
 This regression and simulated-model loopback exchanges do not establish a new real-model Hermes run. The zero-tool selection remains version-dependent and must be verified after plugin discovery for each fresh receiver, together with every private-context check in the walkthrough. Environment filtering is not an OS sandbox.
 
+## Fresh Claude Code local-sample check, October 21, 2026
+
+Claude Code 2.1.302 followed the current guides from a fresh source-only full checkout with spaces in its path, installed the pinned dependencies and ran the local sample once. Actual output contained `completed: true`, `DEMO-1001` / `ready-for-pickup`, `cleanedUp: true` and the final receiver/relay shutdown message. This used an explicit request to execute the sample through normal tool permissions, no installed AGX marketplace plugin, no MCP servers and no resumed session. A broader prerequisite-inspection command was denied by the test session's narrow command permissions; Claude continued using the documented sample commands. Cleanup evidence came from the runner, not a separate process audit. This checks assisted local onboarding, not a new Claude-to-Hermes exchange or native skill installation.
+
+A local Hermes v0.14.0 startup attempt stopped on a provider authentication error before the runtime readiness probe or model invocation. No receiver was started and no real task was sent. It does not establish readiness on that runtime or change the earlier VPS evidence.
+
 ## n8n evidence
 
-The inactive workflow originated from [PR #7](https://github.com/ellavox-ai/nostr-agx/pull/7), head `762930710957b9138232cb7d2e6757e50c588350`. Its node type, parameters and credential display name have since been checked against the published **0.4.0** package. The fictional lookup code was exercised with simulated n8n input. PR #7 reported node tests on n8n 2.43.7; those tests do not establish that this particular workflow imported or exchanged a task in real n8n.
+The inactive workflow originated from [PR #7](https://github.com/ellavox-ai/nostr-agx/pull/7), head `762930710957b9138232cb7d2e6757e50c588350`. Its node type, parameters and credential display name have since been checked against the published **0.4.0** package. The fictional lookup code was exercised with simulated n8n input.
+
+On October 21, 2026, this exact workflow successfully imported through the real n8n 2.43.7 CLI in a disposable container with the published AGX 0.4.0 node files present. The container had networking disabled and only fresh temporary data mounted. Its database confirmed the imported workflow was inactive and retained both expected node types. No credentials were configured, listener activated or task exchanged. This verifies CLI import and stored configuration, not editor interaction, node execution, credential provisioning, admission, restart/replay or end-to-end behavior. The container exited and was removed.
 
 ## Checks still requiring live environments
 
@@ -34,6 +42,6 @@ The inactive workflow originated from [PR #7](https://github.com/ellavox-ai/nost
 - A real Hermes run after the child-environment filtering change.
 - Gemini CLI, xAI Grok Bot and Meta Muse guided onboarding; native discovery/registration is a separate result.
 - Installed Claude/Codex marketplace integration and host-specific installation/send controls.
-- Ordinary ChatGPT requesting and real n8n workflow installation/import/exchange.
+- Ordinary ChatGPT requesting and real n8n credential provisioning, node execution and task exchange; CLI import alone passed as described above.
 
 Keep these limits visible when describing support. Local tests, a published package, or a historical successful exchange do not substitute for the missing live checks.

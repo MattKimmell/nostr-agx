@@ -6,7 +6,7 @@ For a task exchange without n8n, use the [tested local sample](local-sample.md).
 
 The [workflow JSON](n8n-order-status.json) is an inactive import draft for published `@nostr-agx/n8n-nodes-agx@0.4.0`, which includes the trigger behavior from [Sean's PR #7](https://github.com/ellavox-ai/nostr-agx/pull/7). On self-hosted n8n, use **Settings → Community Nodes → Install** with package `@nostr-agx/n8n-nodes-agx` and select version **0.4.0** if the installed n8n exposes a version selector. For an exact command-line install, an operator can run `npm install @nostr-agx/n8n-nodes-agx@0.4.0` in their existing n8n user folder's `nodes` directory (normally `~/.n8n/nodes`), then restart that n8n instance. Do not run this in the AGX example folder. This bundle does not install, import, or activate the workflow. Do not assume n8n Cloud support.
 
-The custom node type, credential name and parameters were checked against the published 0.4.0 package. The lookup code was exercised locally with simulated n8n input. Import and task exchange in real n8n remain unverified for this draft; see [validation history](../references/validation-history.md) for the distinction between upstream node tests and this workflow.
+The custom node type, credential name and parameters were checked against the published 0.4.0 package. The lookup code was exercised locally with simulated n8n input, and this workflow imported successfully as inactive through the real n8n 2.43.7 CLI in a disposable container. Credential provisioning, node execution and task exchange remain unverified; see [validation history](../references/validation-history.md) for the exact evidence limits.
 
 ## Receiver configuration — operator steps
 
@@ -36,7 +36,7 @@ To copy the secret directly into the **Secret Key** field of n8n's credential di
 env AGX_HOME="$DEMO_AGX_HOME" agx identity export --profile n8n-demo --yes
 ```
 
-Configure the relay in the n8n credential separately. The node package is published, but this credential-provisioning sequence and real n8n workflow import/exchange remain unverified here. The lack of that optional integration never blocks the default local sample.
+Configure the relay in the n8n credential separately. CLI workflow import passed, but this credential-provisioning sequence and real n8n task exchange remain unverified here. The lack of that optional integration never blocks the default local sample.
 
 ## Requester steps — follow the selected assistant adapter
 
