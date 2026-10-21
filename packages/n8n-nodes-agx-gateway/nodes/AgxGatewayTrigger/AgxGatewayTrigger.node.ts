@@ -14,6 +14,26 @@ import { gatewayError, gatewayRequest, succeeded } from "../shared/gateway";
  * a captured delivery cannot be replayed later. */
 const SIGNATURE_TOLERANCE_SEC = 300;
 
+/** Signatures accepted in the last tolerance window, oldest first: the same
+ * delivery sent again is refused. Each n8n process remembers its own. */
+const acceptedSignatures = new Map<string, number>();
+const MAX_REMEMBERED_SIGNATURES = 10_000;
+
+/** Whether this signed delivery is new; remembers it if so. */
+function firstDelivery(signature: string, timestamp: number, nowSec: number): boolean {
+	for (const [seen, at] of acceptedSignatures) {
+		if (nowSec - at <= SIGNATURE_TOLERANCE_SEC && acceptedSignatures.size < MAX_REMEMBERED_SIGNATURES) {
+			break;
+		}
+		acceptedSignatures.delete(seen);
+	}
+	if (acceptedSignatures.has(signature)) {
+		return false;
+	}
+	acceptedSignatures.set(signature, timestamp);
+	return true;
+}
+
 interface TriggerOptions {
 	advertise?: boolean;
 	includeUnlisted?: boolean;
@@ -180,7 +200,8 @@ export class AgxGatewayTrigger implements INodeType {
 						displayName: "Ignore Tasks Older Than (Minutes)",
 						name: "maxTaskAge",
 						type: "number",
-						typeOptions: { minValue: 0 },
+						// The gateway's limit: a week.
+						typeOptions: { minValue: 0, maxValue: 10_080 },
 						default: 10,
 						description:
 							"Ignore a task request sent longer ago than this, with no reply: its requester has almost certainly stopped waiting. 0 turns this off.",
@@ -304,8 +325,8 @@ export class AgxGatewayTrigger implements INodeType {
 		const timestamp = Number(req.headers["x-agx-timestamp"]);
 		// The signature covers the exact bytes the gateway sent.
 		const raw = req.rawBody ? req.rawBody.toString("utf8") : JSON.stringify(this.getBodyData());
-		const fresh =
-			Number.isFinite(timestamp) && Math.abs(Date.now() / 1000 - timestamp) <= SIGNATURE_TOLERANCE_SEC;
+		const nowSec = Date.now() / 1000;
+		const fresh = Number.isFinite(timestamp) && Math.abs(nowSec - timestamp) <= SIGNATURE_TOLERANCE_SEC;
 		let valid = false;
 		if (typeof secret === "string" && typeof signature === "string" && fresh) {
 			const expected = Buffer.from(
@@ -317,6 +338,12 @@ export class AgxGatewayTrigger implements INodeType {
 		if (!valid) {
 			const res = this.getResponseObject();
 			res.status(401).json({ error: "This webhook only accepts deliveries signed by its agx gateway" });
+			return { noWebhookResponse: true };
+		}
+		// Signed, but a copy of one already received: replayed within the window.
+		if (!firstDelivery(signature as string, timestamp, nowSec)) {
+			const res = this.getResponseObject();
+			res.status(409).json({ error: "This delivery was already received" });
 			return { noWebhookResponse: true };
 		}
 		return {

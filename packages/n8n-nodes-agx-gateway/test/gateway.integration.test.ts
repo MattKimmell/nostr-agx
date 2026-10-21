@@ -348,8 +348,13 @@ describe("AGX Gateway Trigger: deliveries", () => {
 		expect(n8n.runs).toHaveLength(0);
 
 		// The same request, signed as the gateway signs it, gets through.
-		const ok = await post({ "x-agx-timestamp": String(now), "x-agx-signature": sign(now, body) });
+		const signed = { "x-agx-timestamp": String(now), "x-agx-signature": sign(now, body) };
+		const ok = await post(signed);
 		expect(ok.status).toBe(200);
+		expect(n8n.runs).toHaveLength(1);
+		// Once: a captured delivery sent again is refused.
+		const replayed = await post({ ...signed, "x-agx-delivery": "another-id" });
+		expect(replayed.status).toBe(409);
 		expect(n8n.runs).toHaveLength(1);
 	});
 });

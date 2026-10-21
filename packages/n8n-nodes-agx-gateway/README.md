@@ -218,7 +218,8 @@ data is not sent.
 Every delivery is signed with a secret the gateway made for this subscription, which the trigger
 keeps in the workflow's static data. A request to the webhook URL that the gateway did not sign,
 that was changed on the way, or that was signed more than five minutes earlier is answered `401`
-and starts nothing.
+and starts nothing. A signed delivery sent a second time is answered `409` and starts nothing
+either: each n8n process remembers the deliveries it accepted in the last five minutes.
 
 ### Test runs and restarts
 

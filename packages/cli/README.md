@@ -438,8 +438,9 @@ multicast or unspecified address, such as a cloud metadata service.
 
 Every delivery is signed with the subscription's secret, which `POST /v1/subscriptions` returns
 once: `x-agx-signature` is `v1=` and the hex HMAC-SHA256 of `"<x-agx-timestamp>.<body>"`. Check
-it over the exact bytes received, and refuse a timestamp more than a few minutes old, so a captured
-delivery cannot be replayed. `x-agx-subscription`, `x-agx-event` and `x-agx-delivery` name the
+it over the exact bytes received, refuse a timestamp more than a few minutes old, and remember
+the signatures accepted within that window, so a captured delivery cannot be replayed. (Each
+retry is signed afresh, so a remembered signature is never a legitimate retry.) `x-agx-subscription`, `x-agx-event` and `x-agx-delivery` name the
 subscription, the event type and the Nostr event.
 
 ## Local UI

@@ -10,6 +10,7 @@ import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import { type RunningRelay, startRelay } from "../../relay/server.js";
 import { agx, sandbox } from "../../test/helpers.js";
 import { resolveProfileName } from "../config.js";
+import { loadIdentity } from "../identity.js";
 import { profileDir, seenPath } from "../paths.js";
 import { MESSAGES_FILE } from "../store/message-store.js";
 import { type RunningGateway, startGateway } from "./gateway.js";
@@ -341,6 +342,20 @@ describe("agx gateway: Agent Card", () => {
 		await new Promise((r) => setTimeout(r, 2500));
 		expect(await card()).toBe(true);
 		await api(`/v1/subscriptions/${second.id}`, { method: "DELETE" });
+	}, 30_000);
+	it("replaces a card the profile published before with what its webhooks serve", async () => {
+		await gateway.close();
+		// What `agx serve --advertise` left on the relays.
+		const before = await NostrTransport.create({
+			signer: loadIdentity(profile).signer,
+			relays: [`ws://127.0.0.1:${relay.port}`],
+			ws: WebSocket,
+		});
+		await before.advertise(["old.capability"], { payloadTypes: [DEFAULT_CONTENT_TYPE] });
+		await new Promise((r) => setTimeout(r, 1100));
+		gateway = await startGateway(gatewayOptions());
+		const res = await api(`/v1/agents/${gateway.npub}?capability=old.capability&verifyNip05=false`);
+		expect(await json(res)).toMatchObject({ found: true, capabilities: [], supportsCapability: false });
 	}, 30_000);
 });
 

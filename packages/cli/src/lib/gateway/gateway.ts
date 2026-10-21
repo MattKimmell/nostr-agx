@@ -506,6 +506,18 @@ export async function startGateway(options: GatewayOptions): Promise<RunningGate
 		// Inbound traffic only once the API is up: a gateway that cannot listen
 		// delivers nothing.
 		await client.start({ pollIntervalMs: 0, advertise: false });
+		// A card this profile published before (`agx serve --advertise`, say) may
+		// list capabilities no webhook serves: start from it, so the first publish
+		// replaces it. A profile that has no card gets none until a subscription
+		// advertises: a card is public.
+		try {
+			const { card } = await transport.resolvePeer(identity.publicKey);
+			if (card) {
+				advertised = [...card.capabilities].sort().join("\n");
+			}
+		} catch {
+			// Not known: the next change to the subscriptions publishes it anyway.
+		}
 		publishing = publishing.then(publishCard);
 		await publishing;
 		pumpLoop = runPump();
