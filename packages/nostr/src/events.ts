@@ -1,12 +1,15 @@
 import {
 	buildExchangePayload,
 	buildReceiptPayload,
+	type ExchangeEvidence,
 	type ExchangePayload,
+	isUnknownStatusReceipt,
 	MAX_CONTENT_TYPE,
 	type ParsedExchangeMessage,
 	parseExchangePayload,
 	parseReceiptPayload,
 	type ReceiptPayload,
+	type ReceiptStatus,
 } from "@nostr-agx/core";
 import type { Event } from "nostr-tools";
 import {
@@ -74,10 +77,22 @@ const CREATED_AT_MAX = 9_999_999_999;
  * content-type tag) so a "fits" answer here can never become an oversize throw
  * at sign time. Byte cap only — the char cap (`MAX_BODY`) is the core's
  * concern. Uses `TextEncoder` (not `Buffer`) so it works in edge/browser
- * builds too. */
+ * builds too.
+ *
+ * THROWS what `buildExchangePayload` throws, because it measures through it:
+ * `AgxBodyTooLongError` for `text` over `MAX_BODY`, and, since 0.5.0,
+ * `AgxEvidenceInvalidError` for `evidence` outside the schema. A caller that
+ * wants a number rather than an exception checks both first, as
+ * `NostrTransport.publishMessage` does (`text.length` against `MAX_BODY`,
+ * then `exchangeEvidenceProblem`). */
 export function exchangeMessagePlaintextBytes(
 	text: string,
-	opts?: { contentType?: string; subject?: string | null },
+	opts?: {
+		contentType?: string;
+		subject?: string | null;
+		/** Counted as it will be signed: the same builder runs. */
+		evidence?: ExchangeEvidence;
+	},
 ): number {
 	// 200 = the wire schema's max for messageId/contextId; a 200-char subject is
 	// its cap too. Real ids are shorter (UUIDs), so this over-counts slightly.
@@ -88,6 +103,7 @@ export function exchangeMessagePlaintextBytes(
 		subject: opts?.subject ?? maxId,
 		messageId: maxId,
 		contextId: maxId,
+		evidence: opts?.evidence,
 	});
 	return rumorBytes(JSON.stringify(payload), [
 		["p", HEX64_MAX],
@@ -296,6 +312,9 @@ export async function signMessageEvent(params: {
 	 * unlike `role` below, which AGX does not interpret. See "Automated-reply
 	 * depth (normative)" in `@nostr-agx/core`'s SPEC.md. */
 	autoDepth?: number;
+	/** Records quoted in support of `text`. See "Evidence" in `@nostr-agx/core`'s
+	 * SPEC.md. Throws `AgxEvidenceInvalidError` when it does not fit the schema. */
+	evidence?: ExchangeEvidence;
 	/** NIP-13 difficulty to mine the wrap to (default {@link AGX_POW_BITS}). */
 	powBits?: number;
 }): Promise<WrappedAgxEvent & { payload: ExchangePayload }> {
@@ -309,6 +328,7 @@ export async function signMessageEvent(params: {
 		role: "user",
 		autoDepth: params.autoDepth,
 		contentType: params.contentType,
+		evidence: params.evidence,
 	});
 	const rumor = createRumor({
 		pubkey: await params.signer.getPublicKey(),
@@ -342,7 +362,9 @@ export async function signReceiptEvent(params: {
 	/** The acknowledged message's RUMOR id. */
 	refEventId: string;
 	contextId: string;
-	status: "delivered" | "quarantined";
+	status: ReceiptStatus;
+	/** With `status: "read"`: when the recipient's agent read it (ISO 8601). */
+	readAt?: string;
 	nowSec: number;
 	powBits?: number;
 }): Promise<WrappedAgxEvent> {
@@ -350,6 +372,7 @@ export async function signReceiptEvent(params: {
 		refEventId: params.refEventId,
 		contextId: params.contextId,
 		status: params.status,
+		readAt: params.readAt,
 	});
 	const rumor = createRumor({
 		pubkey: await params.signer.getPublicKey(),
@@ -457,8 +480,9 @@ export function openMessageRumor(
 	return parsed ? { ...rumorMeta(unwrapped), ...parsed } : null;
 }
 
-/** Parse an already-unwrapped rumor as a receipt. Null on another kind or a
- * malformed payload. */
+/** Parse an already-unwrapped rumor as a receipt. Null on another kind, a
+ * malformed payload, or a status this build does not know (tell that last one
+ * apart with {@link isIgnorableReceiptRumor}). */
 export function openReceiptRumor(
 	unwrapped: UnwrappedRumor,
 ): OpenedReceipt | null {
@@ -469,6 +493,16 @@ export function openReceiptRumor(
 		parseRumorJson(unwrapped.rumor.content),
 	);
 	return receipt ? { ...rumorMeta(unwrapped), receipt } : null;
+}
+
+/** True for a receipt rumor that is well formed but carries a status this
+ * build does not know. Such a receipt is ignored, not counted as malformed:
+ * see "Receipts" in SPEC.md. */
+export function isIgnorableReceiptRumor(unwrapped: UnwrappedRumor): boolean {
+	return (
+		unwrapped.rumor.kind === RECEIPT_KIND &&
+		isUnknownStatusReceipt(parseRumorJson(unwrapped.rumor.content))
+	);
 }
 
 /** Unwrap + parse an inbound gift-wrapped message. The wrap's signature is

@@ -2,15 +2,24 @@
 
 ## 0.5.0
 
+Released with `@nostr-agx/core` and `@nostr-agx/nostr` 0.5.0, which add the optional `evidence` member to the message payload (see "Evidence" in the core `SPEC.md`) and a `read` receipt status with an optional `readAt` (see "Receipt statuses"). `agx` does not send or show evidence yet, and does not send `read` receipts.
+
 ### Added
 
 - `agx gateway`: the profile's agent behind an HTTP API, for tools that make HTTP calls but cannot speak Nostr, such as n8n Cloud through `@nostr-agx/n8n-nodes-agx-gateway`. Routes to request a task, send a message, read an Agent Card and show the identity, behind API keys kept as SHA-256 hashes (`agx gateway key new | list | revoke`, or `AGX_GATEWAY_KEY`). Webhook subscriptions carry their own allowlist and capabilities, which the gateway enforces default-deny; a task's result is the webhook's answer, tasks run side by side, up to 8 at once per webhook, so a slow workflow holds up nothing else, and each runs at most once, even across a crash; messages and receipts are delivered in the background with retries. Every delivery is HMAC-signed. Sent messages are kept in the history, as `agx send` keeps them. Listens on 127.0.0.1 by default (`--host`, `--port`, `--poll-interval`).
+
+### Changed
+
+- A sent message's delivery status only moves forward (sent, quarantined, delivered, read), so a `delivered` receipt that arrives after a `read` one no longer marks the message unread again.
+- A receipt with a status this version does not know is ignored instead of being logged as a malformed gift wrap.
 
 ### Fixed
 
 - A task request whose timeout passed while its message was still being published (a slow or hung relay) ended the process with an unhandled rejection; `agx gateway` would stop. The fix is in `@nostr-agx/core`'s `AgxClient.request`.
 - A relay that accepts the connection but never answers the WebSocket upgrade no longer holds one more socket on every poll; the upgrade gives up after 7 seconds. Long-running `serve` and `gateway` processes could run out of file descriptors.
 - While a relay that does not answer holds the inbox position back, the replay store keeps every id the poll can still return. Before, after three days it forgot them and `serve` (and the gateway) handled those messages again. Failure counts are dropped once an event is handled, and the store is written compactly.
+
+For code that calls `@nostr-agx/nostr` directly: `exchangeMessagePlaintextBytes` now throws `AgxEvidenceInvalidError` when given evidence outside the schema. Check it with `exchangeEvidenceProblem` first, as `NostrTransport.publishMessage` does.
 
 ## 0.4.0
 

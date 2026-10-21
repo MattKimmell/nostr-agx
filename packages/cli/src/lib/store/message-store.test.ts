@@ -265,6 +265,16 @@ describe("delivery receipts", () => {
 		expect(store.setDeliveryStatus("out1", "delivered", BOB)).toBe(true);
 		expect(store.listMessages({ direction: "out" })[0]?.deliveryStatus).toBe("delivered");
 	});
+
+	it("only moves forward: a late delivered receipt does not undo read", () => {
+		const store = open();
+		store.addOutbound({ ...msg({ id: "out1", at: "2026-10-07T10:01:00.000Z" }), deliveryStatus: "sent" });
+		expect(store.setDeliveryStatus("out1", "quarantined", BOB)).toBe(true);
+		expect(store.setDeliveryStatus("out1", "read", BOB)).toBe(true);
+		// Still a match (the receipt was for this message), but no step back.
+		expect(store.setDeliveryStatus("out1", "delivered", BOB)).toBe(true);
+		expect(store.listMessages({ direction: "out" })[0]?.deliveryStatus).toBe("read");
+	});
 });
 
 describe("the spool", () => {

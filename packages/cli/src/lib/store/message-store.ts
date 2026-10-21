@@ -475,6 +475,11 @@ export class MessageStore {
 		if (!m) {
 			return false;
 		}
+		// Forward only: a `delivered` receipt that arrives after the `read` one
+		// must not mark a read message unread again.
+		if (deliveryStatusRank(status) < deliveryStatusRank(m.deliveryStatus)) {
+			return true;
+		}
 		if (m.deliveryStatus !== status) {
 			m.deliveryStatus = status;
 			this.messagesDirty = true;
@@ -574,4 +579,13 @@ export class MessageStore {
 		}
 		this.claimed = [];
 	}
+}
+
+/** Delivery statuses in the order an outbound message moves through them
+ * (`sent` is the store's own, the rest come from receipts). Anything else ranks
+ * lowest, so it never overwrites a status this list knows. */
+const DELIVERY_STATUS_ORDER: readonly string[] = ["sent", "quarantined", "delivered", "read"];
+
+function deliveryStatusRank(status: string | null | undefined): number {
+	return status ? DELIVERY_STATUS_ORDER.indexOf(status) : -1;
 }

@@ -13,7 +13,8 @@ vi.mock("./relay-pool", () => ({
 
 import { type Event, finalizeEvent, generateSecretKey } from "nostr-tools";
 import { signMessageEvent, signReceiptEvent } from "./events";
-import { GIFT_WRAP_KIND } from "./kinds";
+import { createRumor, wrapRumor } from "./giftwrap";
+import { GIFT_WRAP_KIND, RECEIPT_KIND } from "./kinds";
 import { NostrTransport } from "./nostr-transport";
 import {
 	type AgxSigner,
@@ -284,5 +285,125 @@ describe("isSignerUnavailable", () => {
 		expect(isSignerUnavailable(foreign)).toBe(true);
 		expect(isSignerUnavailable(new Error("invalid MAC"))).toBe(false);
 		expect(isSignerUnavailable("AgxSignerUnavailableError")).toBe(false);
+	});
+});
+
+describe("NostrTransport.poll forwards evidence", () => {
+	it("hands the host the evidence the sender signed, and none when it sent none", async () => {
+		const bob = await localSigner(bobSecret).getPublicKey();
+		const evidence = {
+			v: 1 as const,
+			records: [
+				{
+					key: { field: "roNumber", value: "0057658556" },
+					fields: { status: "Repair In Process" },
+					observedAt: "2026-10-20T14:03:11.000Z",
+				},
+			],
+		};
+		const withEvidence = await signMessageEvent({
+			signer: alice,
+			recipientPubkey: bob,
+			text: "status update",
+			evidence,
+			nowSec: NOW,
+		});
+		const { message: without } = await wrapsForBob();
+		pollInbox.mockResolvedValue({
+			events: [withEvidence.event, without.event],
+			complete: true,
+		});
+		const transport = await NostrTransport.create({
+			signer: localSigner(bobSecret),
+			relays: [],
+		});
+
+		const res = await transport.poll({ since: 0 });
+
+		const byId = new Map(res.messages.map((m) => [m.eventId, m]));
+		expect(byId.get(withEvidence.rumorId)?.evidence).toEqual(evidence);
+		expect(byId.get(without.rumorId)).not.toHaveProperty("evidence");
+	});
+});
+
+/** A receipt rumor from Alice to Bob with whatever payload a test needs, wrapped
+ * the way signReceiptEvent wraps one: how a NEWER peer's receipt (or a broken
+ * one) arrives. */
+async function receiptWrapWithPayload(payload: unknown): Promise<Event> {
+	const bob = await localSigner(bobSecret).getPublicKey();
+	const rumor = createRumor({
+		pubkey: await alice.getPublicKey(),
+		kind: RECEIPT_KIND,
+		tags: [
+			["p", bob],
+			["e", "0".repeat(64)],
+		],
+		content: JSON.stringify(payload),
+		nowSec: NOW,
+	});
+	return wrapRumor({ signer: alice, rumor, recipientPubkey: bob, nowSec: NOW });
+}
+
+describe("NostrTransport.poll and receipt statuses", () => {
+	async function pollWith(events: Event[]) {
+		pollInbox.mockResolvedValue({ events, complete: true });
+		const warn = vi.fn();
+		const transport = await NostrTransport.create({
+			signer: localSigner(bobSecret),
+			relays: [],
+			logger: { warn },
+		});
+		return { res: await transport.poll({ since: 0 }), warn };
+	}
+
+	it("forwards a read receipt with when it was read", async () => {
+		const bob = await localSigner(bobSecret).getPublicKey();
+		const read = await signReceiptEvent({
+			signer: alice,
+			recipientPubkey: bob,
+			refEventId: "0".repeat(64),
+			contextId: "ctx",
+			status: "read",
+			readAt: "2026-10-20T15:36:12.000Z",
+			nowSec: NOW,
+		});
+
+		const { res, warn } = await pollWith([read.event]);
+
+		expect(res.receipts).toHaveLength(1);
+		expect(res.receipts[0].receipt).toMatchObject({
+			status: "read",
+			readAt: "2026-10-20T15:36:12.000Z",
+		});
+		expect(warn).not.toHaveBeenCalled();
+	});
+
+	it("ignores a receipt whose status a newer peer added: no receipt, no warning", async () => {
+		const wrap = await receiptWrapWithPayload({
+			v: 1,
+			kind: "receipt",
+			refEventId: "0".repeat(64),
+			contextId: "ctx",
+			status: "replied",
+		});
+
+		const { res, warn } = await pollWith([wrap]);
+
+		expect(res.receipts).toEqual([]);
+		expect(res.messages).toEqual([]);
+		// Recorded as seen, so the next poll does not open it again.
+		expect(res.discarded).toEqual([wrap.id]);
+		expect(warn).not.toHaveBeenCalled();
+	});
+
+	it("still counts a broken receipt as malformed, and warns", async () => {
+		const wrap = await receiptWrapWithPayload({ v: 1, kind: "receipt" });
+
+		const { res, warn } = await pollWith([wrap]);
+
+		expect(res.receipts).toEqual([]);
+		expect(res.discarded).toEqual([wrap.id]);
+		expect(warn).toHaveBeenCalledTimes(1);
+		expect(warn.mock.calls[0][1]).toMatchObject({ malformedRumor: 1 });
 	});
 });
