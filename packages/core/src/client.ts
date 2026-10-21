@@ -90,6 +90,14 @@ export interface AgxClientOptions {
 	 * (unbounded at-least-once retries). Prevents a poison event from stalling the
 	 * inbox and letting a held cursor outrun the SeenStore retention window. */
 	maxDispatchAttempts?: number;
+	/** Task handlers that may run at once. With the default, 1, a handler runs
+	 * inside `pump()`, which waits for it, and its request is recorded as handled
+	 * once it has answered. Above 1, `pump()` starts each task in a free slot and
+	 * moves on, so a slow handler holds up neither other tasks nor messages; it
+	 * waits only while every slot is busy. A task then counts as handled once it
+	 * has started: a restart while it runs does not run it again, and its
+	 * requester's timeout covers the result it never gets. */
+	maxConcurrentTasks?: number;
 }
 
 interface Pending {
@@ -136,6 +144,9 @@ export class AgxClient {
 	private readonly requestTimeoutMs: number;
 	private readonly pollOverlapSec: number;
 	private readonly maxDispatchAttempts: number;
+	private readonly maxConcurrentTasks: number;
+	/** Handlers running outside `pump()` (`maxConcurrentTasks` above 1). */
+	private readonly runningTasks = new Set<Promise<void>>();
 	private readonly handlers = new Map<string, TaskHandler>();
 	private readonly pending = new Map<string, Pending>();
 	private cursor: number;
@@ -160,6 +171,9 @@ export class AgxClient {
 		this.pollOverlapSec = opts.pollOverlapSec ?? DEFAULT_POLL_OVERLAP_SEC;
 		this.maxDispatchAttempts =
 			opts.maxDispatchAttempts ?? DEFAULT_MAX_DISPATCH_ATTEMPTS;
+		const concurrent = Math.floor(opts.maxConcurrentTasks ?? 1);
+		this.maxConcurrentTasks =
+			Number.isFinite(concurrent) && concurrent > 1 ? concurrent : 1;
 		this.cursor = opts.startCursor ?? 0;
 	}
 
@@ -253,6 +267,11 @@ export class AgxClient {
 				peer: this.normalizeId(peer),
 			});
 		});
+		// The timeout or a stop() can settle it while the publish below is still
+		// in flight, before the caller holds it: handled here, it is not an
+		// unhandled rejection (which would end the process). The caller still
+		// gets the rejection from `return result`.
+		result.catch(() => undefined);
 
 		const sent = await this.transport
 			.publishMessage(peer, {
@@ -700,6 +719,38 @@ export class AgxClient {
 			transportId: msg.transportId,
 			sentAt: msg.sentAt,
 		};
+		if (this.maxConcurrentTasks === 1) {
+			await this.runTask(msg, env, handler, task);
+			return;
+		}
+		while (this.runningTasks.size >= this.maxConcurrentTasks) {
+			await Promise.race(this.runningTasks);
+		}
+		const running: Promise<void> = this.runTask(msg, env, handler, task)
+			.catch((err) =>
+				this.log.error?.("AGX: task failed outside its handler", {
+					taskId: env.taskId,
+					error: String(err),
+				}),
+			)
+			.finally(() => this.runningTasks.delete(running));
+		this.runningTasks.add(running);
+	}
+
+	/** Resolves once no task handler is running outside `pump()`. */
+	async tasksSettled(): Promise<void> {
+		while (this.runningTasks.size > 0) {
+			await Promise.allSettled([...this.runningTasks]);
+		}
+	}
+
+	/** Run a task's handler and send its result. */
+	private async runTask(
+		msg: AgxIncomingMessage,
+		env: TaskRequestEnvelope,
+		handler: TaskHandler,
+		task: Task,
+	): Promise<void> {
 		try {
 			const output = await handler(task);
 			await this.sendResult(msg.from, env.taskId, {

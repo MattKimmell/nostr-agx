@@ -45,3 +45,59 @@ jobs:
       - run: pnpm build
       - run: pnpm --filter @nostr-agx/cli exec playwright install --with-deps chromium
       - run: pnpm --filter @nostr-agx/cli test:e2e:ui
+
+  n8n-scan:
+    name: n8n verification scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm --filter @nostr-agx/n8n-nodes-agx-gateway build
+      # n8n's own checks for verified (n8n Cloud) nodes, pinned; not a dependency of the repository.
+      - run: npm install --prefix "$RUNNER_TEMP/n8n-scan" --no-save --no-audit --no-fund @n8n/scan-community-package@0.39.0
+      # valid-author: the package needs an author email before n8n can verify it.
+      - run: >-
+          node scripts/scan-n8n-package.mjs "$RUNNER_TEMP/n8n-scan" packages/n8n-nodes-agx-gateway
+          --allow @n8n/community-nodes/valid-author
+
+  gateway-image:
+    name: Gateway container
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm build
+      - name: Build deploy/gateway/Dockerfile from the CLI as it would be published
+        run: |
+          mkdir -p "$RUNNER_TEMP/agx-pkg"
+          (cd packages/cli && pnpm pack --pack-destination "$RUNNER_TEMP/agx-pkg")
+          python3 -m http.server 8931 --bind 127.0.0.1 --directory "$RUNNER_TEMP/agx-pkg" &
+          sleep 1
+          version=$(node -p "require('./packages/cli/package.json').version")
+          docker build --network host \
+            --build-arg AGX_PACKAGE="http://127.0.0.1:8931/nostr-agx-cli-${version}.tgz" \
+            -t agx-gateway:ci deploy/gateway
+      - name: Run it until its health check passes, then stop it
+        run: |
+          docker volume create agx-ci
+          docker run --rm -v agx-ci:/data agx-gateway:ci identity new
+          docker run -d --name agx-ci -e AGX_RELAY=wss://relay.invalid -v agx-ci:/data agx-gateway:ci
+          for i in $(seq 1 45); do
+            status=$(docker inspect -f '{{.State.Health.Status}}' agx-ci)
+            [ "$status" = healthy ] && break
+            sleep 2
+          done
+          docker logs agx-ci
+          [ "$status" = healthy ] || { echo "not healthy: $status"; exit 1; }
+          docker stop agx-ci
+          [ "$(docker inspect -f '{{.State.ExitCode}}' agx-ci)" = 0 ]

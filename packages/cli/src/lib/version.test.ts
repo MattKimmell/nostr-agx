@@ -13,3 +13,12 @@ describe("AGX_CLI_VERSION", () => {
 		expect(AGX_CLI_VERSION).toBe(pkg.version);
 	});
 });
+
+describe("the gateway container", () => {
+	it("installs and is tagged with this release", () => {
+		const read = (file: string) =>
+			readFileSync(new URL(`../../../../deploy/gateway/${file}`, import.meta.url), "utf8");
+		expect(read("Dockerfile")).toContain(`ARG AGX_PACKAGE=@nostr-agx/cli@${AGX_CLI_VERSION}\n`);
+		expect(read("compose.yaml")).toContain(`image: agx-gateway:${AGX_CLI_VERSION}\n`);
+	});
+});

@@ -21,8 +21,9 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
 const root = resolve(import.meta.dirname, "..");
-/** `nostr` depends on `core`; the CLI and the n8n nodes bundle both. */
-const ORDER = ["core", "nostr", "cli", "n8n-nodes-agx"];
+/** `nostr` depends on `core`; the CLI and the n8n nodes bundle both. The
+ * gateway nodes depend on nothing, but release with the CLI that serves them. */
+const ORDER = ["core", "nostr", "cli", "n8n-nodes-agx", "n8n-nodes-agx-gateway"];
 
 const args = process.argv.slice(2);
 const dryRun = args.includes("--dry-run");

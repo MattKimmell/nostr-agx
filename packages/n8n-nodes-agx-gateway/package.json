@@ -1,0 +1,65 @@
+{
+	"name": "@nostr-agx/n8n-nodes-agx-gateway",
+	"version": "0.5.0",
+	"description": "n8n community nodes for NIP-AGX through an agx gateway: request tasks from other agents, send them messages, read their Agent Cards, and answer their tasks with an n8n workflow. Works on n8n Cloud.",
+	"license": "MIT",
+	"author": {
+		"name": "Ellavox AI",
+		"url": "https://www.ellavox.ai"
+	},
+	"homepage": "https://github.com/ellavox-ai/nostr-agx/tree/main/packages/n8n-nodes-agx-gateway#readme",
+	"repository": {
+		"type": "git",
+		"url": "git+https://github.com/ellavox-ai/nostr-agx.git",
+		"directory": "packages/n8n-nodes-agx-gateway"
+	},
+	"bugs": {
+		"url": "https://github.com/ellavox-ai/nostr-agx/issues"
+	},
+	"keywords": [
+		"n8n-community-node-package",
+		"n8n",
+		"nip-agx",
+		"nostr-agx",
+		"agents",
+		"agent-to-agent"
+	],
+	"files": [
+		"dist",
+		"README.md",
+		"LICENSE"
+	],
+	"publishConfig": {
+		"access": "public"
+	},
+	"n8n": {
+		"n8nNodesApiVersion": 1,
+		"strict": true,
+		"credentials": [
+			"dist/credentials/AgxGatewayApi.credentials.js"
+		],
+		"nodes": [
+			"dist/nodes/AgxGateway/AgxGateway.node.js",
+			"dist/nodes/AgxGatewayTrigger/AgxGatewayTrigger.node.js"
+		]
+	},
+	"scripts": {
+		"build": "node scripts/build.mjs",
+		"type-check": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p tsconfig.test.json",
+		"test": "vitest run",
+		"test:unit": "vitest run"
+	},
+	"peerDependencies": {
+		"n8n-workflow": "*"
+	},
+	"devDependencies": {
+		"@nostr-agx/core": "workspace:*",
+		"@nostr-agx/nostr": "workspace:*",
+		"@types/node": "^26.4.0",
+		"@types/ws": "^8.18.1",
+		"n8n-workflow": "2.35.3",
+		"typescript": "^5.9.3",
+		"vitest": "^4.1.11",
+		"ws": "^8.21.3"
+	}
+}

@@ -7,6 +7,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 // feed it adversarial / dense responses without a network.
 
 const mockVerify = vi.fn();
+/** The event hash: by default the id the event claims. */
+const mockHash = vi.fn((ev: Event) => ev.id);
 /** Per-subscribe responder: given the REQ filter, return the events to emit and
  * whether to reach EOSE (false → the sub never eoses → reqPage times out). */
 let responder: (filter: Filter) => {
@@ -27,6 +29,7 @@ let publisher: (url: string) => Promise<void> = async () => {};
 
 vi.mock("nostr-tools", () => ({
 	verifyEvent: (ev: Event) => mockVerify(ev),
+	getEventHash: (ev: Event) => mockHash(ev),
 	finalizeEvent: (ev: unknown) => ev,
 }));
 vi.mock("nostr-tools/relay", () => ({
@@ -94,7 +97,9 @@ function ev(overrides: Partial<Event>): Event {
 }
 
 beforeEach(() => {
+	mockVerify.mockReset();
 	mockVerify.mockReturnValue(true);
+	mockHash.mockImplementation((ev: Event) => ev.id);
 	responder = () => ({ events: [], eose: true });
 	sentFilters = [];
 	publisher = async () => {};
@@ -927,5 +932,24 @@ describe("publishToRelays: an OK false is a refusal even without a prefix", () =
 			const res = await publishToRelays(["wss://r"], EV);
 			expect(res.rejected[0].kind).toBe("unreachable");
 		}
+	});
+});
+
+describe("pollInbox checks each signature once", () => {
+	it("does not re-check a signature it passed, and still matches every copy to its id", async () => {
+		const wrap = ev({ id: "verified-once", created_at: 1500, content: "original" });
+		responder = () => ({ events: [wrap], eose: true });
+		const poll = () => pollInbox({ relays: ["wss://r"], pubkey: ME, since: 1000, limit: 50 });
+
+		expect((await poll()).events.map((e) => e.id)).toEqual(["verified-once"]);
+		expect((await poll()).events.map((e) => e.id)).toEqual(["verified-once"]);
+		// Two days of wraps come back on every poll: the signature is checked once.
+		expect(mockVerify.mock.calls.filter(([e]) => e.id === "verified-once")).toHaveLength(1);
+
+		// A relay replaying the known id with other content does not match its hash.
+		const tampered = { ...wrap, content: "tampered" };
+		mockHash.mockImplementation((e: Event) => (e.content === "original" ? e.id : "a-different-hash"));
+		responder = () => ({ events: [tampered], eose: true });
+		expect((await poll()).events).toHaveLength(0);
 	});
 });

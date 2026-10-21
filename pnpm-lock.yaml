@@ -108,6 +108,33 @@ importers:
         specifier: 4.4.3
         version: 4.4.3
 
+  packages/n8n-nodes-agx-gateway:
+    devDependencies:
+      '@nostr-agx/core':
+        specifier: workspace:*
+        version: link:../core
+      '@nostr-agx/nostr':
+        specifier: workspace:*
+        version: link:../nostr
+      '@types/node':
+        specifier: ^26.4.0
+        version: 26.4.0
+      '@types/ws':
+        specifier: ^8.18.1
+        version: 8.18.1
+      n8n-workflow:
+        specifier: 2.35.3
+        version: 2.35.3(@opentelemetry/core@2.12.0(@opentelemetry/api@1.9.1))(zod@3.25.76)
+      typescript:
+        specifier: ^5.9.3
+        version: 5.9.3
+      vitest:
+        specifier: ^4.1.11
+        version: 4.1.11(@opentelemetry/api@1.9.1)(@types/node@26.4.0)(happy-dom@20.11.12)(jsdom@30.0.1(@noble/hashes@2.4.0))(vite@8.0.14(@types/node@26.4.0)(esbuild@0.28.2)(jiti@2.7.0)(tsx@4.23.12)(yaml@2.9.0))
+      ws:
+        specifier: ^8.21.3
+        version: 8.21.3
+
   packages/nostr:
     dependencies:
       '@noble/hashes':
@@ -3543,6 +3570,41 @@ snapshots:
       any-promise: 1.3.0
       object-assign: 4.1.1
       thenify-all: 1.6.0
+
+  n8n-workflow@2.35.3(@opentelemetry/core@2.12.0(@opentelemetry/api@1.9.1))(zod@3.25.76):
+    dependencies:
+      '@codemirror/autocomplete': 6.20.0
+      '@n8n/errors': 0.13.0
+      '@n8n/expression-runtime': 0.26.1
+      '@n8n/tournament': 1.9.1
+      '@n8n/utils': 1.43.1
+      '@sentry/core': 10.76.2
+      '@sentry/node': 10.76.2(@opentelemetry/core@2.12.0(@opentelemetry/api@1.9.1))
+      ast-types: 0.16.1
+      axios: 1.18.0
+      callsites: 3.1.0
+      esprima-next: 5.8.4
+      form-data: 4.0.6
+      jmespath: 0.16.0
+      js-base64: 3.7.8
+      json-schema: 0.4.0
+      jsonrepair: 3.13.2
+      jssha: 3.3.1
+      lodash: 4.18.1
+      luxon: 3.7.2
+      md5: 2.3.0
+      recast: 0.22.0
+      ssh2: 1.15.0
+      title-case: 3.0.3
+      transliteration: 2.3.5
+      uuid: 11.1.1
+      xml2js: 0.6.2
+      zod: 3.25.76
+    transitivePeerDependencies:
+      - '@opentelemetry/core'
+      - '@opentelemetry/exporter-trace-otlp-http'
+      - debug
+      - supports-color
 
   n8n-workflow@2.35.3(@opentelemetry/core@2.12.0(@opentelemetry/api@1.9.1))(zod@4.4.3):
     dependencies:

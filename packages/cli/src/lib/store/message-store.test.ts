@@ -465,3 +465,25 @@ describe("records from a newer version", () => {
 		expect(readFileSync(path, "utf8")).toContain(future);
 	});
 });
+
+describe("message history over time", () => {
+	it("keeps messages in time order however they arrive", () => {
+		const store = open();
+		store.addInbound(msg({ id: "late", at: "2026-10-07T10:02:00.000Z" }));
+		store.addInbound(msg({ id: "early", at: "2026-10-07T10:00:00.000Z" }));
+		store.addInbound(msg({ id: "middle", at: "2026-10-07T10:01:00.000Z" }));
+		store.addInbound(msg({ id: "late-too", at: "2026-10-07T10:02:00.000Z" }));
+		expect(store.listMessages().map((m) => m.id)).toEqual(["early", "middle", "late", "late-too"]);
+		expect(store.addInbound(msg({ id: "middle", at: "2026-10-07T10:01:00.000Z" }))).toBe(false);
+	});
+
+	it("keeps only the newest messages when told to", () => {
+		const store = new MessageStore(dir, () => clock, { maxMessages: 2 });
+		store.addInbound(msg({ id: "a", at: "2026-10-07T10:00:00.000Z" }));
+		store.addInbound(msg({ id: "b", at: "2026-10-07T10:01:00.000Z" }));
+		store.addInbound(msg({ id: "c", at: "2026-10-07T10:02:00.000Z" }));
+		expect(store.listMessages().map((m) => m.id)).toEqual(["b", "c"]);
+		store.flush();
+		expect(open().listMessages().map((m) => m.id)).toEqual(["b", "c"]);
+	});
+});

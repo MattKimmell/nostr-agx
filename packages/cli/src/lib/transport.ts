@@ -5,6 +5,24 @@ import type { Profile } from "./config.js";
 import { configError } from "./errors.js";
 import type { Identity } from "./identity.js";
 
+/** How long a relay may take to accept the WebSocket upgrade. */
+export const HANDSHAKE_TIMEOUT_MS = 7_000;
+
+/**
+ * `WebSocket` from `ws`, giving up on a relay that takes the connection and
+ * never answers the upgrade. `ws` sets no limit of its own, and the relay pool
+ * stops waiting without closing the socket, so such a relay would hold one
+ * more socket on every poll, until a long-running `agx serve` or `agx gateway`
+ * ran out of file descriptors.
+ */
+export function withHandshakeTimeout(timeoutMs: number) {
+	return class extends WebSocket {
+		constructor(address: string | URL, protocols?: string | string[]) {
+			super(address, protocols, { handshakeTimeout: timeoutMs });
+		}
+	};
+}
+
 /**
  * Build the Nostr transport for this profile.
  *
@@ -29,7 +47,7 @@ export function createTransport(
 	return NostrTransport.create({
 		signer: identity.signer,
 		relays: profile.relays,
-		ws: WebSocket,
+		ws: withHandshakeTimeout(HANDSHAKE_TIMEOUT_MS),
 		logger,
 	});
 }

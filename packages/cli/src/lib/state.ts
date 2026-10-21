@@ -1,7 +1,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import { DEFAULT_SEEN_RETENTION_SEC, type SeenStore } from "@nostr-agx/core";
 import { z } from "zod";
-import { seenPath, statePath, writePrivateJson } from "./paths.js";
+import { seenPath, statePath, writePrivateJson, writePrivateText } from "./paths.js";
 
 /**
  * Durable poll state for `agx serve`.
@@ -98,9 +98,12 @@ export class FileSeenStore implements SeenStore {
 	private seenAt: Map<string, number>;
 	private failures: Record<string, number>;
 	private dirty = false;
+	/** The host's poll cursor (unix seconds); see {@link holdFor}. */
+	private cursor: number;
 
 	constructor(profile: string) {
 		this.path = seenPath(profile);
+		this.cursor = loadState(profile).cursor;
 		const raw: unknown = existsSync(this.path)
 			? JSON.parse(readFileSync(this.path, "utf8"))
 			: null;
@@ -120,13 +123,28 @@ export class FileSeenStore implements SeenStore {
 		this.dirty = data.ids.length > 0;
 	}
 
+	/**
+	 * Polls reach back from the host's cursor, which stays put while a relay
+	 * does not answer (a poll that may have missed events must not move it).
+	 * Ids are kept for the retention window counted from the cursor whenever it
+	 * is behind, so a relay that is down for days does not make the store
+	 * forget events the poll still returns, and run them again.
+	 */
+	holdFor(cursor: number): void {
+		this.cursor = cursor;
+	}
+
+	private cutoff(now: number): number {
+		return (this.cursor > 0 ? Math.min(now, this.cursor) : now) - DEFAULT_SEEN_RETENTION_SEC;
+	}
+
 	private live(id: string, now = nowSec()): boolean {
 		const at = this.seenAt.get(id);
-		return at !== undefined && at > now - DEFAULT_SEEN_RETENTION_SEC;
+		return at !== undefined && at > this.cutoff(now);
 	}
 
 	private prune(now: number): void {
-		const cutoff = now - DEFAULT_SEEN_RETENTION_SEC;
+		const cutoff = this.cutoff(now);
 		for (const [id, at] of this.seenAt) {
 			if (at > cutoff && this.seenAt.size <= MAX_SEEN) {
 				break;
@@ -158,6 +176,11 @@ export class FileSeenStore implements SeenStore {
 			this.seenAt.set(id, now);
 			this.dirty = true;
 		}
+		// Handled, or dead-lettered: its failure count has done its job.
+		if (id in this.failures) {
+			delete this.failures[id];
+			this.dirty = true;
+		}
 		this.prune(now);
 	}
 
@@ -180,14 +203,19 @@ export class FileSeenStore implements SeenStore {
 		if (!this.dirty) {
 			return;
 		}
-		writePrivateJson(this.path, {
-			version: 2,
-			entries: Array.from(this.seenAt, ([id, seenAt]) => ({
-				id,
-				seenAt,
-			})),
-			failures: this.failures,
-		});
+		// Compact: a busy agent keeps tens of thousands of ids here, and the
+		// file is rewritten on every poll that handled something.
+		writePrivateText(
+			this.path,
+			`${JSON.stringify({
+				version: 2,
+				entries: Array.from(this.seenAt, ([id, seenAt]) => ({
+					id,
+					seenAt,
+				})),
+				failures: this.failures,
+			})}\n`,
+		);
 		this.dirty = false;
 	}
 }

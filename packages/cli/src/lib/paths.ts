@@ -34,6 +34,10 @@ import { dirname, join } from "node:path";
  *     profiles/<name>/seen.json           replay-protection ids
  *     profiles/<name>/pending-login.json  an `agx login` waiting for approval
  *     profiles/<name>/pending-login.lock  held by the one process polling it
+ *     profiles/<name>/gateway-keys.json   `agx gateway` API keys (SHA-256 hashes)
+ *     profiles/<name>/gateway-subscriptions.json
+ *                                         webhooks `agx gateway` delivers to,
+ *                                         with their signing secrets
  */
 
 export function agxHome(): string {
@@ -74,6 +78,16 @@ export function pendingLoginPath(profile: string): string {
 
 export function pendingLoginLockPath(profile: string): string {
 	return join(profileDir(profile), "pending-login.lock");
+}
+
+/** `agx gateway`'s API keys, hashed. */
+export function gatewayKeysPath(profile: string): string {
+	return join(profileDir(profile), "gateway-keys.json");
+}
+
+/** `agx gateway`'s webhook subscriptions, with their signing secrets. */
+export function gatewaySubscriptionsPath(profile: string): string {
+	return join(profileDir(profile), "gateway-subscriptions.json");
 }
 
 export function ensureDir(dir: string): void {

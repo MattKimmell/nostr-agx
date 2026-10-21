@@ -549,6 +549,7 @@ export async function serveCommand(options: ServeOptions): Promise<void> {
 			if (result.complete) {
 				state.cursor = result.cursor;
 			}
+			seen.holdFor(state.cursor);
 			persist();
 		} catch (error) {
 			say(
