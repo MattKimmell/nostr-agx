@@ -63,6 +63,7 @@ export async function createAgxSync(options: {
 					if (result.complete) {
 						cursor = result.cursor;
 					}
+					seen.holdFor(cursor);
 					options.store.absorbSpool();
 					// History first, then the seen-store and cursor: a crash in between re-delivers and the store dedupes.
 					options.store.flush();

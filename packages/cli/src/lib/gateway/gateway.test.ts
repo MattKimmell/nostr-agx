@@ -479,6 +479,34 @@ describe("agx gateway: inbound", () => {
 		expect(busy.held).toHaveLength(1);
 	}, 30_000);
 
+	it("answers `result too large` for a workflow answer it could never send on", async () => {
+		const requester = await peer();
+		const hook = await webhook(() => ({ status: 200, body: "x".repeat(1_100_000) }));
+		await subscribe({ url: hook.url, events: ["task"], capabilities: ["invoice.huge"], allowedPeers: [requester.npub] });
+		const result = requester.client.request(gateway.npub, "invoice.huge", {}, { timeoutMs: 20_000 });
+		await expect(pumping(result, requester.client)).rejects.toThrow("result too large");
+	}, 30_000);
+
+	it("tells a task still waiting for its webhook that the gateway is stopping", async () => {
+		const requester = await peer();
+		const busy = await heldWebhook();
+		await subscribe({ url: busy.url, events: ["task"], capabilities: ["invoice.stop"], allowedPeers: [requester.npub] });
+		// The first task's workflow never finishes; the second waits for it.
+		const first = requester.client.request(gateway.npub, "invoice.stop", { n: 1 }, { timeoutMs: 3_000 });
+		first.catch(() => undefined);
+		await waitFor(() => busy.held.length === 1);
+		// One task per webhook in these tests: the second waits its turn.
+		const second = requester.client.request(gateway.npub, "invoice.stop", { n: 2 }, { timeoutMs: 25_000 });
+		second.catch(() => undefined);
+		await new Promise((r) => setTimeout(r, 1500));
+		const closing = gateway.close();
+		await expect(pumping(second, requester.client)).rejects.toThrow("the gateway is stopping");
+		await closing;
+		expect(busy.held).toHaveLength(1);
+		busy.answer(0, {});
+		gateway = await startGateway(gatewayOptions());
+	}, 40_000);
+
 	it("delivers an allowed agent's message in the background, with the depth a reply declares", async () => {
 		const sender = await peer();
 		const hook = await webhook();

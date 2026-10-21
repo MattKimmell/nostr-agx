@@ -297,11 +297,12 @@ export class SubscriptionStore {
 		this.subscriptions = parsed.data.subscriptions;
 	}
 
-	private save(): void {
-		writePrivateJson(gatewaySubscriptionsPath(this.profile), {
-			version: 1,
-			subscriptions: this.subscriptions,
-		});
+	/** On disk first, then in memory: a write that fails (a full disk) leaves
+	 * the gateway as it was, not serving a subscription that will not survive a
+	 * restart. */
+	private replace(subscriptions: Subscription[]): void {
+		writePrivateJson(gatewaySubscriptionsPath(this.profile), { version: 1, subscriptions });
+		this.subscriptions = subscriptions;
 	}
 
 	list(): Subscription[] {
@@ -319,8 +320,7 @@ export class SubscriptionStore {
 			secret: randomBytes(32).toString("base64url"),
 			createdAt: nowSec(),
 		};
-		this.subscriptions.push(subscription);
-		this.save();
+		this.replace([...this.subscriptions, subscription]);
 		return subscription;
 	}
 
@@ -329,8 +329,7 @@ export class SubscriptionStore {
 		if (kept.length === this.subscriptions.length) {
 			return false;
 		}
-		this.subscriptions = kept;
-		this.save();
+		this.replace(kept);
 		return true;
 	}
 

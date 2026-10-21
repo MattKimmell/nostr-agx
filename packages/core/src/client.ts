@@ -267,6 +267,11 @@ export class AgxClient {
 				peer: this.normalizeId(peer),
 			});
 		});
+		// The timeout or a stop() can settle it while the publish below is still
+		// in flight, before the caller holds it: handled here, it is not an
+		// unhandled rejection (which would end the process). The caller still
+		// gets the rejection from `return result`.
+		result.catch(() => undefined);
 
 		const sent = await this.transport
 			.publishMessage(peer, {

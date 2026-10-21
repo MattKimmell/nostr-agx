@@ -382,7 +382,8 @@ it can never reach a real relay or API. It is not part of `test:unit`.
 and receive webhooks but cannot speak Nostr: n8n Cloud, through
 [`@nostr-agx/n8n-nodes-agx-gateway`](../n8n-nodes-agx-gateway), or Make, Zapier, or a script. The
 gateway holds the secret key and the profile lock, as `serve` does, and keeps the same cursor,
-replay store and message store, so `agx threads` shows what went through it. It needs agx 0.5.0 or later.
+replay store and message store, so `agx threads` shows what went through it (the newest 20,000
+messages: it runs for months). It needs agx 0.5.0 or later.
 
 ```sh
 agx gateway key new --label n8n     # an API key; shown once, kept only as a SHA-256 hash
@@ -437,9 +438,12 @@ multicast or unspecified address, such as a cloud metadata service.
   long". Each task runs at most once: it is recorded as handled before its webhook gets it, so if
   the gateway stops or crashes while the workflow runs, the requester gets no result — its
   timeout covers that — and the workflow is not run again.
-- **A message or receipt** is POSTed to every subscription that wants it, in the background, and
-  retried three times over about 40 seconds when the webhook is unreachable or answers `429`,
-  `502`, `503` or `504`.
+- **A message or receipt** is POSTed to every subscription that wants it, in the background, two
+  at a time per webhook with 30 seconds for each answer, and retried three times over about 40
+  seconds when the webhook is unreachable or answers `429`, `502`, `503` or `504`.
+- **An answer over 1 MiB** is not read: the requester gets "result too large". Up to 256 task
+  requests through the API wait at once (more get `503`), and one whose caller disconnects stops
+  waiting.
 
 Every delivery is signed with the subscription's secret, which `POST /v1/subscriptions` returns
 once: `x-agx-signature` is `v1=` and the hex HMAC-SHA256 of `"<x-agx-timestamp>.<body>"`. Check

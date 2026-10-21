@@ -1,4 +1,6 @@
 import { createHmac } from "node:crypto";
+import { request as httpRequest } from "node:http";
+import { request as httpsRequest } from "node:https";
 import { runtime } from "../runtime.js";
 import { AGX_CLI_VERSION } from "../version.js";
 import type { Subscription } from "./subscriptions.js";
@@ -26,12 +28,14 @@ export function signDelivery(secret: string, timestamp: number, body: string): s
 export type DeliveryOutcome =
 	| { kind: "response"; status: number; body: unknown }
 	| { kind: "timeout" }
+	/** The answer was larger than {@link MAX_ANSWER_BYTES}. */
+	| { kind: "oversized" }
 	/** `sent`: the connection was made, so the webhook may have the event. */
 	| { kind: "unreachable"; error: string; sent: boolean };
 
 /** Errors from a connection that was made and then broke, so the webhook may
- * have the event. Anything else (refused, no such host, a blocked port, a bad
- * certificate) failed before the request went out. */
+ * have the event. Anything else (refused, no such host, a bad certificate)
+ * failed before the request went out. */
 const BROKE_OFF = new Set([
 	"ECONNRESET",
 	"ECONNABORTED",
@@ -46,6 +50,49 @@ function isTimeout(error: unknown): boolean {
 	return error instanceof Error && (error.name === "TimeoutError" || error.name === "AbortError");
 }
 
+/** The most of a webhook's answer that is read. A task's result has to fit in
+ * one encrypted Nostr message, which is far smaller. */
+export const MAX_ANSWER_BYTES = 1024 * 1024;
+
+class OversizedAnswer extends Error {}
+
+/**
+ * POST with Node's http client rather than `fetch`, which gives up after five
+ * minutes without response headers whatever its signal allows, while a
+ * workflow may take an hour. Redirects are not followed, and at most
+ * {@link MAX_ANSWER_BYTES} of the answer is read.
+ */
+function post(
+	url: URL,
+	headers: Record<string, string>,
+	body: string,
+	signal: AbortSignal,
+): Promise<{ status: number; text: string }> {
+	return new Promise((resolve, reject) => {
+		const send = url.protocol === "https:" ? httpsRequest : httpRequest;
+		const req = send(
+			url,
+			{ method: "POST", headers: { ...headers, "content-length": String(Buffer.byteLength(body)) }, signal },
+			(res) => {
+				const chunks: Buffer[] = [];
+				let size = 0;
+				res.on("data", (chunk: Buffer) => {
+					size += chunk.length;
+					if (size > MAX_ANSWER_BYTES) {
+						req.destroy(new OversizedAnswer());
+						return;
+					}
+					chunks.push(chunk);
+				});
+				res.on("end", () => resolve({ status: res.statusCode ?? 0, text: Buffer.concat(chunks).toString("utf8") }));
+				res.on("error", reject);
+			},
+		);
+		req.on("error", reject);
+		req.end(body);
+	});
+}
+
 /** POST one event to a subscription's webhook and wait for its answer. */
 export async function deliver(
 	subscription: Subscription,
@@ -55,12 +102,12 @@ export async function deliver(
 ): Promise<DeliveryOutcome> {
 	const body = JSON.stringify(event);
 	const timestamp = Math.floor(runtime().now() / 1000);
-	let response: Response;
+	const signal = AbortSignal.timeout(timeoutMs);
+	let answer: { status: number; text: string };
 	try {
-		response = await runtime().fetch(subscription.url, {
-			method: "POST",
-			redirect: "manual",
-			headers: {
+		answer = await post(
+			new URL(subscription.url),
+			{
 				"content-type": "application/json",
 				"user-agent": `agx-gateway/${AGX_CLI_VERSION}`,
 				"x-agx-subscription": subscription.id,
@@ -70,39 +117,32 @@ export async function deliver(
 				[SIGNATURE_HEADER]: signDelivery(subscription.secret, timestamp, body),
 			},
 			body,
-			signal: AbortSignal.timeout(timeoutMs),
-		});
+			signal,
+		);
 	} catch (error) {
-		if (isTimeout(error)) {
+		if (error instanceof OversizedAnswer) {
+			return { kind: "oversized" };
+		}
+		// Aborted, before or after the answer began: the webhook is still busy.
+		if (signal.aborted || isTimeout(error)) {
 			return { kind: "timeout" };
 		}
-		const cause = error instanceof Error && error.cause instanceof Error ? error.cause : null;
-		const code = (cause as { code?: unknown } | null)?.code;
+		const code = (error as { code?: unknown }).code;
 		return {
 			kind: "unreachable",
-			error: `${error instanceof Error ? error.message : String(error)}${cause ? `: ${cause.message}` : ""}`,
+			error: error instanceof Error ? error.message : String(error),
 			sent: typeof code === "string" && BROKE_OFF.has(code),
 		};
 	}
-	let text: string;
-	try {
-		text = await response.text();
-	} catch (error) {
-		// The answer stalled, or broke off, after the webhook got the event.
-		if (isTimeout(error)) {
-			return { kind: "timeout" };
-		}
-		return { kind: "unreachable", error: error instanceof Error ? error.message : String(error), sent: true };
-	}
-	let parsed: unknown = text;
-	if (text) {
+	let parsed: unknown = answer.text;
+	if (answer.text) {
 		try {
-			parsed = JSON.parse(text);
+			parsed = JSON.parse(answer.text);
 		} catch {
 			// Not JSON: the text is the answer.
 		}
 	}
-	return { kind: "response", status: response.status, body: text ? parsed : null };
+	return { kind: "response", status: answer.status, body: answer.text ? parsed : null };
 }
 
 /** Whether a failed delivery is worth trying again: nothing answered, or a
@@ -123,12 +163,14 @@ interface Queued {
 }
 
 export interface DeliveryQueueOptions {
-	/** Deliveries in flight at once. */
+	/** Deliveries in flight at once, in all. */
 	concurrency?: number;
+	/** Deliveries in flight at once to one webhook. */
+	perSubscription?: number;
 	/** Waits before each retry, in ms; their count is the number of retries. */
 	retryDelaysMs?: number[];
-	/** Most deliveries waiting; past it the oldest is dropped. */
-	maxQueued?: number;
+	/** Most deliveries waiting for one webhook; past it, its oldest is dropped. */
+	maxQueuedPerSubscription?: number;
 	timeoutMs?: number;
 	onFailure?: (subscription: Subscription, eventId: string, detail: string) => void;
 }
@@ -138,33 +180,36 @@ export interface DeliveryQueueOptions {
  * gateway does not need the webhook's answer, and waiting for it would hold up
  * the inbox while a workflow runs. They are already in the profile's message
  * store, so one that cannot be delivered is not lost from `agx inbox`.
+ *
+ * Each webhook has its own slots and its own share of the queue, so one that
+ * is down or slow does not hold up the others.
  */
 export class DeliveryQueue {
 	private readonly waiting: Queued[] = [];
 	private active = 0;
+	private readonly activeBySubscription = new Map<string, number>();
+	private readonly queuedBySubscription = new Map<string, number>();
 	private readonly concurrency: number;
+	private readonly perSubscription: number;
 	private readonly retryDelaysMs: number[];
-	private readonly maxQueued: number;
+	private readonly maxQueuedPerSubscription: number;
 	private readonly timeoutMs: number;
 	private idleWaiters: (() => void)[] = [];
 	/** Deliveries waiting out a retry delay, outside the in-flight slots. */
 	private retrying = 0;
 
 	constructor(private readonly options: DeliveryQueueOptions = {}) {
-		this.concurrency = options.concurrency ?? 4;
+		this.concurrency = options.concurrency ?? 16;
+		this.perSubscription = options.perSubscription ?? 2;
 		this.retryDelaysMs = options.retryDelaysMs ?? [2_000, 10_000, 30_000];
-		this.maxQueued = options.maxQueued ?? 1_000;
-		this.timeoutMs = options.timeoutMs ?? 120_000;
+		this.maxQueuedPerSubscription = options.maxQueuedPerSubscription ?? 500;
+		// A message's webhook answers as soon as it has the event (n8n's
+		// "onReceived"); it does not wait for the workflow.
+		this.timeoutMs = options.timeoutMs ?? 30_000;
 	}
 
 	enqueue(subscription: Subscription, event: Record<string, unknown>, eventId: string): void {
-		if (this.waiting.length >= this.maxQueued) {
-			const dropped = this.waiting.shift();
-			if (dropped) {
-				this.options.onFailure?.(dropped.subscription, dropped.eventId, "dropped: too many deliveries waiting");
-			}
-		}
-		this.waiting.push({ subscription, event, eventId, attempt: 0 });
+		this.push({ subscription, event, eventId, attempt: 0 });
 		this.drain();
 	}
 
@@ -176,21 +221,57 @@ export class DeliveryQueue {
 		return new Promise((resolve) => this.idleWaiters.push(resolve));
 	}
 
+	/** Deliveries not yet made: waiting, in flight, or waiting to retry. */
+	pending(): number {
+		return this.waiting.length + this.active + this.retrying;
+	}
+
 	private isIdle(): boolean {
-		return this.active === 0 && this.waiting.length === 0 && this.retrying === 0;
+		return this.pending() === 0;
+	}
+
+	private push(item: Queued): void {
+		const id = item.subscription.id;
+		const queued = this.queuedBySubscription.get(id) ?? 0;
+		if (queued >= this.maxQueuedPerSubscription) {
+			const oldest = this.waiting.findIndex((other) => other.subscription.id === id);
+			if (oldest >= 0) {
+				const [dropped] = this.waiting.splice(oldest, 1);
+				this.options.onFailure?.(dropped.subscription, dropped.eventId, "dropped: too many deliveries waiting");
+				this.queuedBySubscription.set(id, queued - 1);
+			}
+		}
+		this.waiting.push(item);
+		this.queuedBySubscription.set(id, (this.queuedBySubscription.get(id) ?? 0) + 1);
 	}
 
 	private drain(): void {
-		while (this.active < this.concurrency && this.waiting.length > 0) {
-			const next = this.waiting.shift();
-			if (next) {
-				this.active += 1;
-				void this.run(next).finally(() => {
-					this.active -= 1;
-					this.drain();
-					this.settle();
-				});
+		for (let i = 0; i < this.waiting.length && this.active < this.concurrency; ) {
+			const item = this.waiting[i];
+			const id = item.subscription.id;
+			const busy = this.activeBySubscription.get(id) ?? 0;
+			if (busy >= this.perSubscription) {
+				i += 1;
+				continue;
 			}
+			this.waiting.splice(i, 1);
+			this.queuedBySubscription.set(id, (this.queuedBySubscription.get(id) ?? 1) - 1);
+			this.active += 1;
+			this.activeBySubscription.set(id, busy + 1);
+			void this.run(item).finally(() => {
+				this.active -= 1;
+				const left = (this.activeBySubscription.get(id) ?? 1) - 1;
+				if (left > 0) {
+					this.activeBySubscription.set(id, left);
+				} else {
+					this.activeBySubscription.delete(id);
+				}
+				if ((this.queuedBySubscription.get(id) ?? 0) <= 0) {
+					this.queuedBySubscription.delete(id);
+				}
+				this.drain();
+				this.settle();
+			});
 		}
 	}
 
@@ -212,7 +293,9 @@ export class DeliveryQueue {
 				? `HTTP ${outcome.status}`
 				: outcome.kind === "timeout"
 					? "no answer in time"
-					: outcome.error;
+					: outcome.kind === "oversized"
+						? `an answer larger than ${MAX_ANSWER_BYTES} bytes`
+						: outcome.error;
 		const delay = this.retryDelaysMs[item.attempt];
 		if (!retryable(outcome) || delay === undefined) {
 			this.options.onFailure?.(item.subscription, item.eventId, detail);
@@ -226,7 +309,7 @@ export class DeliveryQueue {
 			.catch(() => undefined)
 			.then(() => {
 				this.retrying -= 1;
-				this.waiting.push(item);
+				this.push(item);
 				this.drain();
 				this.settle();
 			});

@@ -1,8 +1,39 @@
 import { type AgxLogger, noopLogger } from "@nostr-agx/core";
-import { type Event, type Filter, verifyEvent } from "nostr-tools";
+import { type Event, type Filter, getEventHash, verifyEvent } from "nostr-tools";
 import { Relay } from "nostr-tools/relay";
 import { GIFT_WRAP_KIND } from "./kinds";
 import type { AgxSigner } from "./signer";
+
+/**
+ * Ids whose signature has already checked out in this process, oldest first.
+ * An inbox poll re-reads two days of gift wraps every time (NIP-59 backdates
+ * them up to two days), and a Schnorr check costs milliseconds: a busy agent
+ * would spend most of its CPU re-checking signatures it has checked before.
+ *
+ * A cached id still has to match the event's own hash, which binds its content
+ * and `created_at`: a relay that replays a known id with anything changed is
+ * caught as before. Only the signature, made over that id, is not re-checked.
+ */
+const verifiedIds = new Set<string>();
+const MAX_VERIFIED_IDS = 100_000;
+
+/** `verifyEvent`, without repeating the signature check for an id it passed. */
+function verifiedOnce(event: Event): boolean {
+	if (verifiedIds.has(event.id)) {
+		return getEventHash(event) === event.id;
+	}
+	if (!verifyEvent(event)) {
+		return false;
+	}
+	verifiedIds.add(event.id);
+	if (verifiedIds.size > MAX_VERIFIED_IDS) {
+		const oldest = verifiedIds.values().next().value;
+		if (oldest !== undefined) {
+			verifiedIds.delete(oldest);
+		}
+	}
+	return true;
+}
 
 /**
  * Relay pool: short-lived connections for poll/publish/discovery. WebSocket is
@@ -591,7 +622,7 @@ export async function pollInbox(params: {
 							// don't pay for it twice. Keep the stored copy, because
 							// the cursor is read off it below.
 							const known = byId.get(ev.id);
-							if (!known && !verifyEvent(ev)) {
+							if (!known && !verifiedOnce(ev)) {
 								continue;
 							}
 							if (!known) {

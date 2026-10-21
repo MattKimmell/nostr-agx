@@ -173,16 +173,29 @@ export class MessageStore {
 	 * it takes over what `agx send` spooled. Without it the spool is only read, so a
 	 * reader sees sent messages without changing any file.
 	 */
+	/** Ids of `messages`, for the duplicate check every delivery makes. */
+	private readonly ids: Set<string>;
+	private readonly maxMessages: number;
+
 	constructor(
 		private readonly dir: string,
 		private readonly now: () => Date = () => new Date(),
-		options: { claimSpool?: boolean } = {},
+		options: {
+			claimSpool?: boolean;
+			/** Keep only this many messages, the newest: for a long-running
+			 * process that would otherwise grow the history without end. */
+			maxMessages?: number;
+		} = {},
 	) {
 		this.messagesPath = join(dir, MESSAGES_FILE);
 		this.heldPath = join(dir, HELD_FILE);
+		this.maxMessages = options.maxMessages ?? Number.POSITIVE_INFINITY;
 		const messages = readLines(this.messagesPath, messageSchema);
 		const held = readLines(this.heldPath, heldSchema);
-		this.messages = messages.records;
+		// In time order, as every insert keeps them (a stable sort: equal times
+		// keep their order).
+		this.messages = messages.records.sort((a, b) => a.at.localeCompare(b.at));
+		this.ids = new Set(this.messages.map((m) => m.id));
 		this.messagesUnknown = messages.unknown;
 		this.held = held.records;
 		this.heldUnknown = held.unknown;
@@ -259,12 +272,30 @@ export class MessageStore {
 	}
 
 	private has(id: string): boolean {
-		return this.messages.some((m) => m.id === id);
+		return this.ids.has(id);
 	}
 
+	/** In time order, after any message with the same time; the oldest go past
+	 * `maxMessages`. */
 	private insert(message: StoredMessage): void {
-		this.messages.push(message);
-		this.messages.sort((a, b) => a.at.localeCompare(b.at));
+		let low = 0;
+		let high = this.messages.length;
+		while (low < high) {
+			const middle = (low + high) >>> 1;
+			if (this.messages[middle].at.localeCompare(message.at) <= 0) {
+				low = middle + 1;
+			} else {
+				high = middle;
+			}
+		}
+		this.messages.splice(low, 0, message);
+		this.ids.add(message.id);
+		while (this.messages.length > this.maxMessages) {
+			const dropped = this.messages.shift();
+			if (dropped) {
+				this.ids.delete(dropped.id);
+			}
+		}
 		this.messagesDirty = true;
 	}
 

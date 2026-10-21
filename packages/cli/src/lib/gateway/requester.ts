@@ -42,19 +42,41 @@ export class Requester {
 		});
 	}
 
-	/** Send a task and wait for its result; rejects as `AgxClient.request` does. */
-	async request(peer: string, capability: string, payload: unknown, timeoutMs: number): Promise<unknown> {
+	/** Send a task and wait for its result; rejects as `AgxClient.request` does,
+	 * or when `signal` aborts (the API client went away), which stops polling
+	 * for it. */
+	async request(
+		peer: string,
+		capability: string,
+		payload: unknown,
+		timeoutMs: number,
+		signal?: AbortSignal,
+	): Promise<unknown> {
 		if (this.waiting === 0 && nowSec() - this.lastPolledSec > MAX_WRAP_BACKDATE_SEC) {
 			this.client = this.newClient();
 			this.lastPolledSec = nowSec();
 		}
 		const result = this.client.request(peer, capability, payload, { timeoutMs });
+		// Settled by its timeout even when nobody waits for it any more.
+		result.catch(() => undefined);
 		this.waiting += 1;
 		this.poll();
+		let onAbort: (() => void) | undefined;
+		const aborted = new Promise<never>((_, reject) => {
+			onAbort = () => reject(new Error("AGX request abandoned: the caller went away"));
+			if (signal?.aborted) {
+				onAbort();
+			}
+			signal?.addEventListener("abort", onAbort, { once: true });
+		});
+		aborted.catch(() => undefined);
 		try {
-			return await result;
+			return await Promise.race([result, aborted]);
 		} finally {
 			this.waiting -= 1;
+			if (onAbort) {
+				signal?.removeEventListener("abort", onAbort);
+			}
 		}
 	}
 

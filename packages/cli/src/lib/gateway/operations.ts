@@ -65,7 +65,11 @@ function messageOf(error: unknown): string {
 }
 
 /** `POST /v1/tasks`: send a task to an agent and wait for its result. */
-export async function requestTask(deps: OperationDeps, input: unknown): Promise<Record<string, unknown>> {
+export async function requestTask(
+	deps: OperationDeps,
+	input: unknown,
+	signal?: AbortSignal,
+): Promise<Record<string, unknown>> {
 	const req = body(input);
 	const peer = peerOf(req.peer);
 	const npub = toNpub(peer);
@@ -104,7 +108,7 @@ export async function requestTask(deps: OperationDeps, input: unknown): Promise<
 
 	let output: unknown;
 	try {
-		output = await deps.requester.request(peer, capability, payload, timeoutSec * 1000);
+		output = await deps.requester.request(peer, capability, payload, timeoutSec * 1000, signal);
 	} catch (error) {
 		const message = messageOf(error);
 		if (message.startsWith("AGX request timed out")) {

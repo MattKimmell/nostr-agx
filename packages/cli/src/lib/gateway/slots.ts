@@ -6,12 +6,13 @@
 export class KeyedSlots {
 	private readonly held = new Map<string, number>();
 	private readonly queued = new Map<string, (() => void)[]>();
+	private closed = false;
 
 	constructor(private readonly limit: number) {}
 
 	/** Wait for a slot for `key`; call what it resolves to, once, to free it. */
 	async acquire(key: string): Promise<() => void> {
-		if ((this.held.get(key) ?? 0) < this.limit) {
+		if (this.closed || (this.held.get(key) ?? 0) < this.limit) {
 			this.held.set(key, (this.held.get(key) ?? 0) + 1);
 		} else {
 			// Handed over by a release: the count stays as it is.
@@ -43,6 +44,18 @@ export class KeyedSlots {
 				this.held.delete(key);
 			}
 		};
+	}
+
+	/** Let every waiter go, and every later caller straight through: on
+	 * shutdown, so they can see the gateway is stopping and say so. */
+	close(): void {
+		this.closed = true;
+		for (const queue of this.queued.values()) {
+			for (const next of queue.splice(0)) {
+				next();
+			}
+		}
+		this.queued.clear();
 	}
 
 	/** Slots held for `key` (tests). */

@@ -92,6 +92,15 @@ const DEFAULT_TASKS_PER_WEBHOOK = 8;
 /** /v1/health reports unhealthy once no poll has finished for this long, or
  * for ten poll intervals if that is longer. */
 const HEALTH_STALE_MIN_MS = 60_000;
+/** A relay silent this long is logged, and again every hour while it stays so. */
+const RELAY_WARN_AFTER_MS = 10 * 60_000;
+const RELAY_WARN_EVERY_MS = 60 * 60_000;
+/** Messages the gateway keeps in the profile's history, newest first. */
+const MAX_HISTORY_MESSAGES = 20_000;
+/** Task requests through the API waiting for their results at once. */
+const MAX_TASK_REQUESTS_WAITING = 256;
+/** Open connections to the API at once. */
+const MAX_CONNECTIONS = 1_024;
 /** How long stopping waits for the poll, running tasks and the card. */
 const SHUTDOWN_WAIT_MS = 8_000;
 
@@ -116,7 +125,8 @@ export async function startGateway(options: GatewayOptions): Promise<RunningGate
 		const state = loadState(name);
 		const transport = await createTransport(profile, identity, options.logger);
 		const seen = new FileSeenStore(name);
-		const store = new MessageStore(profileDir(name), undefined, { claimSpool: true });
+		// The newest messages only: the gateway runs for months.
+		const store = new MessageStore(profileDir(name), undefined, { claimSpool: true, maxMessages: MAX_HISTORY_MESSAGES });
 		const allowed = new Set<string>();
 		const refreshAllowed = () => {
 			try {
@@ -188,7 +198,7 @@ export async function startGateway(options: GatewayOptions): Promise<RunningGate
 				let outcome: Awaited<ReturnType<typeof deliver>>;
 				try {
 					if (closed) {
-						throw new AgxTaskDeclined("the gateway is stopping");
+						throw new AgxPublicError("the gateway is stopping");
 					}
 					// It waited for the webhook to be free: past the age the webhook
 					// accepts, the requester has almost certainly stopped waiting.
@@ -208,6 +218,9 @@ export async function startGateway(options: GatewayOptions): Promise<RunningGate
 				}
 				if (outcome.kind === "timeout") {
 					throw new AgxPublicError("the workflow did not finish in time");
+				}
+				if (outcome.kind === "oversized") {
+					throw new AgxPublicError("result too large");
 				}
 				if (outcome.kind === "unreachable") {
 					if (outcome.sent) {
@@ -352,6 +365,9 @@ export async function startGateway(options: GatewayOptions): Promise<RunningGate
 		// does not count.
 		let lastPollAt: number | null = null;
 		let lastCompletePollAt: number | null = null;
+		// Since when some relay has not answered, and when that was last logged.
+		let incompleteSince: number | null = null;
+		let relayWarnedAt: number | null = null;
 		const runPump = async () => {
 			while (!closed) {
 				try {
@@ -362,10 +378,27 @@ export async function startGateway(options: GatewayOptions): Promise<RunningGate
 					if (result.complete) {
 						cursor = result.cursor;
 					}
+					seen.holdFor(cursor);
 					persist();
 					lastPollAt = Date.now();
 					if (result.complete) {
+						if (relayWarnedAt !== null) {
+							log("POLL  every relay answers again");
+						}
 						lastCompletePollAt = lastPollAt;
+						incompleteSince = null;
+						relayWarnedAt = null;
+					} else {
+						incompleteSince ??= lastPollAt;
+						if (
+							lastPollAt - incompleteSince >= RELAY_WARN_AFTER_MS &&
+							(relayWarnedAt === null || lastPollAt - relayWarnedAt >= RELAY_WARN_EVERY_MS)
+						) {
+							log(
+								`POLL  a relay has not answered since ${new Date(incompleteSince).toISOString()}: the inbox position stays where it was until every relay answers. Check the relays (AGX_RELAY, or agx config set relays).`,
+							);
+							relayWarnedAt = lastPollAt;
+						}
 					}
 				} catch (error) {
 					log(`poll failed: ${error instanceof Error ? error.message : String(error)}`);
@@ -383,6 +416,7 @@ export async function startGateway(options: GatewayOptions): Promise<RunningGate
 			}
 		};
 
+		let tasksWaiting = 0;
 		const route = async (req: IncomingMessage, res: ServerResponse): Promise<void> => {
 			const url = new URL(req.url ?? "/", "http://gateway");
 			const method = req.method ?? "GET";
@@ -422,7 +456,29 @@ export async function startGateway(options: GatewayOptions): Promise<RunningGate
 				return;
 			}
 			if (method === "POST" && path === "/v1/tasks") {
-				sendJson(res, 200, await requestTask(deps, await readJson(req)));
+				// Each one holds a connection and a result poll until it is answered.
+				if (tasksWaiting >= MAX_TASK_REQUESTS_WAITING) {
+					throw new ApiError(
+						503,
+						"busy",
+						`${MAX_TASK_REQUESTS_WAITING} task requests are already waiting for results`,
+						"Try again shortly.",
+					);
+				}
+				tasksWaiting += 1;
+				// A caller that goes away (n8n gave up, a proxy timed out) stops the wait.
+				const gone = new AbortController();
+				res.on("close", () => {
+					if (!res.writableFinished) {
+						gone.abort();
+					}
+				});
+				try {
+					const body = await readJson(req);
+					sendJson(res, 200, await requestTask(deps, body, gone.signal));
+				} finally {
+					tasksWaiting -= 1;
+				}
 				return;
 			}
 			if (method === "POST" && path === "/v1/messages") {
@@ -498,12 +554,16 @@ export async function startGateway(options: GatewayOptions): Promise<RunningGate
 				sendError(res, new ApiError(500, "internal_error", "The gateway could not complete the request"));
 			});
 		});
-		// A task request waits for its result, up to an hour.
-		server.requestTimeout = 0;
+		// The time to RECEIVE a request: a task request then waits for its
+		// result, up to an hour, which this does not limit.
+		server.requestTimeout = 120_000;
 		server.headersTimeout = 60_000;
+		server.maxConnections = MAX_CONNECTIONS;
 		let pumpLoop: Promise<void> = Promise.resolve();
 		stopGateway = async () => {
 			closed = true;
+			// Tasks waiting for a busy webhook are told the gateway is stopping.
+			webhookSlots.close();
 			if (cardTimer) {
 				clearTimeout(cardTimer);
 			}
@@ -527,8 +587,11 @@ export async function startGateway(options: GatewayOptions): Promise<RunningGate
 			} catch (error) {
 				log(`state could not be saved: ${error instanceof Error ? error.message : String(error)}`);
 			}
-			await Promise.race([Promise.all([publishing, client.tasksSettled()]), deadline]);
+			await Promise.race([Promise.all([publishing, client.tasksSettled(), queue.idle()]), deadline]);
 			clearTimeout(timer);
+			if (queue.pending() > 0) {
+				log(`DROP  ${queue.pending()} message and receipt deliveries not made before stopping (they are in agx inbox)`);
+			}
 			await client.stop().catch(() => undefined);
 		};
 

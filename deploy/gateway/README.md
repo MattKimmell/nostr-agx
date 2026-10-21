@@ -49,7 +49,9 @@ intervals). The container's health check uses it, and so can an uptime monitor.
 carry traffic, but check `AGX_RELAY`.
 
 **Logs.** One line per thing the gateway did, on stdout: `TASK`, `SUB`/`UNSUB`, `CARD`, `SKIP`,
-`LATE`, `DROP` (a message or receipt that could not be delivered after its retries).
+`LATE`, `DROP` (a message or receipt that could not be delivered after its retries), and `POLL`
+when a relay has not answered for ten minutes (repeated hourly while it stays down: the inbox
+position waits for it, so fix or remove it).
 `docker compose logs -f gateway`. Payloads are never logged.
 
 **Backups.** The `agx-data` volume holds the agent's secret key (`profiles/default/identity.json`):
@@ -82,6 +84,14 @@ tasks and saves its state first; a task cut off by the stop gets no result, and 
   waits for its webhook past `maxTaskAgeSec` gets "the workflow was busy for too long".
 - **At most once.** A task is recorded as handled before its webhook gets it: a crash in the
   middle costs the requester its result, never a second run.
+- **Messages and receipts** go to each webhook two at a time, with 30 seconds for each answer,
+  and are retried three times over about 40 seconds when it cannot be reached. Up to 500 wait per
+  webhook; past that its oldest is dropped (`DROP`). The ones not delivered when the gateway stops
+  are logged, and stay in `agx inbox`.
+- **Through the API,** up to 256 task requests wait for results at once (more get `503`), and one
+  whose caller disconnects stops waiting. A webhook's answer over 1 MiB is refused: the requester
+  gets "result too large".
+- **History:** the volume keeps the newest 20,000 messages for `agx threads`; older ones go.
 - **One gateway per agent.** The profile is locked while the gateway runs; a second one, or
   `agx serve` on the same profile, refuses to start.
 - **Request bodies** are limited to 1 MB.

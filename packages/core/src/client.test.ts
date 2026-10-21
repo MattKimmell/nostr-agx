@@ -1182,3 +1182,24 @@ describe("AgxClient runs tasks side by side when asked to", () => {
 		await expect(Promise.all(results)).resolves.toEqual(["ok", "ok", "ok"]);
 	});
 });
+
+describe("AgxClient request while its publish is slow", () => {
+	it("times out cleanly when the timeout fires before the publish finishes", async () => {
+		const slow = bus.transport(ALICE);
+		let finishPublish: () => void = () => undefined;
+		const transport = {
+			...slow,
+			publishMessage: () =>
+				new Promise<{ ok: boolean; eventId: string; contextId: string }>((resolve) => {
+					finishPublish = () => resolve({ ok: true, eventId: "e", contextId: "c" });
+				}),
+		};
+		const alice = new AgxClient({ transport });
+		const pending = alice.request(BOB, "slow.publish", {}, { timeoutMs: 20 });
+		// The timeout fires while the publish is still in flight: before this
+		// fix that rejection was unhandled, which ends a Node process.
+		await new Promise((r) => setTimeout(r, 50));
+		finishPublish();
+		await expect(pending).rejects.toThrow(/timed out/);
+	});
+});
