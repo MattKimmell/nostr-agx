@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { AgxBodyTooLongError } from "./errors";
+import { AgxBodyTooLongError, AgxEvidenceInvalidError } from "./errors";
 
 /**
  * The AGX payload wire format — transport-agnostic. An A2A `Message`-shaped
@@ -118,6 +118,53 @@ export function isKnownContentType(contentType: string): boolean {
 	return KNOWN_CONTENT_TYPES.has(contentType);
 }
 
+/** Most records one message's `evidence` may carry. */
+export const MAX_EVIDENCE_RECORDS = 20;
+/** Most fields one evidence record may carry (at least one is required). */
+export const MAX_EVIDENCE_FIELDS = 12;
+/** Cap on a string VALUE in an evidence record (`key.value`, a field value), in
+ * characters. */
+export const MAX_EVIDENCE_VALUE = 500;
+/** Cap on a NAME in an evidence record (`key.field`, a field name, `source`),
+ * in characters. */
+export const MAX_EVIDENCE_NAME = 200;
+
+const evidenceNameSchema = z.string().min(1).max(MAX_EVIDENCE_NAME);
+const evidenceStringSchema = z.string().max(MAX_EVIDENCE_VALUE);
+
+/** One record the sender read from its system of record: which record it is
+ * (`key`), the fields it quotes, and when the sender's tool returned them. */
+export const evidenceRecordSchema = z.object({
+	/** Identifies the record, e.g. `{ field: "roNumber", value: "0057658556" }`. */
+	key: z.object({
+		field: evidenceNameSchema,
+		value: z.union([evidenceStringSchema, z.number()]),
+	}),
+	fields: z
+		.record(
+			evidenceNameSchema,
+			z.union([evidenceStringSchema, z.number(), z.boolean(), z.null()]),
+		)
+		.refine((fields) => {
+			const count = Object.keys(fields).length;
+			return count >= 1 && count <= MAX_EVIDENCE_FIELDS;
+		}, `between 1 and ${MAX_EVIDENCE_FIELDS} fields`),
+	/** ISO 8601 time the sender's tool returned this record. */
+	observedAt: z.iso.datetime({ offset: true }),
+	/** Human label for the system of record, e.g. "DMS". */
+	source: evidenceNameSchema.optional(),
+});
+export type EvidenceRecord = z.infer<typeof evidenceRecordSchema>;
+
+/** Records the sender quotes in support of a message. See "Evidence" in
+ * SPEC.md: sender-declared, so a receiver decides whether to trust it, and it
+ * never affects delivery. */
+export const exchangeEvidenceSchema = z.object({
+	v: z.literal(1),
+	records: z.array(evidenceRecordSchema).min(1).max(MAX_EVIDENCE_RECORDS),
+});
+export type ExchangeEvidence = z.infer<typeof exchangeEvidenceSchema>;
+
 /** A2A-Message-shaped payload (the JSON a transport carries confidentially). */
 export const exchangePayloadSchema = z.object({
 	v: z.literal(1),
@@ -138,6 +185,12 @@ export const exchangePayloadSchema = z.object({
 	 * bounds REPLIES, never DELIVERY; an unusable value is unknown, exactly like an
 	 * absent one. */
 	autoDepth: z.number().int().min(0).max(255).optional().catch(undefined),
+	/** Records the sender quotes in support of the text. OPTIONAL; see
+	 * "Evidence" in SPEC.md. `.catch(undefined)` for the reason `autoDepth` gives:
+	 * evidence a receiver cannot read is dropped WHOLE, never partly (a record
+	 * missing from a set can change what the set says), and the message is still
+	 * delivered. */
+	evidence: exchangeEvidenceSchema.optional().catch(undefined),
 	messageId: z.string().min(1).max(200),
 	contextId: z.string().min(1).max(200),
 	parts: z
@@ -182,6 +235,10 @@ export interface ParsedExchangeMessage {
 	autoDepth: number | null;
 	subject: string | null;
 	contentType: string;
+	/** Records the sender quotes in support of `text`. Absent when the sender
+	 * sent none or sent evidence this build cannot read. Sender-declared: whether
+	 * to trust it is the receiver's decision (see "Evidence" in SPEC.md). */
+	evidence?: ExchangeEvidence;
 }
 
 /** Flatten an A2A message's text parts into one string. */
@@ -201,6 +258,10 @@ export function buildExchangePayload(params: {
 	 * reply. Leave it unset for anything a human authored, approved or asked for,
 	 * and for a new conversation — a human in the loop resets the depth. */
 	autoDepth?: number;
+	/** Records quoted in support of `text`. Validated here, and throws
+	 * {@link AgxEvidenceInvalidError} rather than sending evidence the receiver
+	 * would drop. */
+	evidence?: ExchangeEvidence;
 }): ExchangePayload {
 	// THROW, DO NOT TRUNCATE. This used to `.slice(0, MAX_BODY)`, which made the
 	// transport's size guard unable to ever fire: `exchangeMessagePlaintextBytes`
@@ -235,7 +296,53 @@ export function buildExchangePayload(params: {
 		// byte-identical to what every pre-autoDepth peer already emits and every
 		// pre-autoDepth parser already expects.
 		...sanitizedDepth(params.autoDepth),
+		...checkedEvidence(params.evidence),
 	};
+}
+
+/** `{ evidence }` as the receiver will parse it, `{}` when there is none.
+ *
+ * Throws where `sanitizedDepth` coerces, because evidence cannot be repaired:
+ * dropping the bad record would sign a different claim than the caller made,
+ * and sending it as-is would have the receiver drop all of it while the caller
+ * believes it was delivered. The parsed copy is what ships, so a key the schema
+ * does not name (an internal id, say) never leaves the sender. OMITTED when
+ * absent, so a sender without evidence stays byte-identical to older builds. */
+function checkedEvidence(value: ExchangeEvidence | undefined): {
+	evidence?: ExchangeEvidence;
+} {
+	if (value === undefined) {
+		return {};
+	}
+	const parsed = exchangeEvidenceSchema.safeParse(value);
+	if (!parsed.success) {
+		throw new AgxEvidenceInvalidError(describeEvidenceIssues(parsed.error));
+	}
+	return { evidence: parsed.data };
+}
+
+/** Why `evidence` failed validation, or `null` when it is valid or absent.
+ * For callers that want to report the problem instead of catching
+ * {@link AgxEvidenceInvalidError} from `buildExchangePayload`. */
+export function exchangeEvidenceProblem(
+	evidence: ExchangeEvidence | undefined,
+): string | null {
+	if (evidence === undefined) {
+		return null;
+	}
+	const parsed = exchangeEvidenceSchema.safeParse(evidence);
+	return parsed.success ? null : describeEvidenceIssues(parsed.error);
+}
+
+function describeEvidenceIssues(error: z.ZodError): string {
+	return error.issues
+		.slice(0, 3)
+		.map((issue) =>
+			issue.path.length > 0
+				? `${issue.path.map(String).join(".")}: ${issue.message}`
+				: issue.message,
+		)
+		.join("; ");
 }
 
 /** `{ autoDepth: n }` for a usable positive depth, `{}` for anything else. */
@@ -278,6 +385,7 @@ export function parseExchangePayload(
 			? parsed.data.subject.slice(0, MAX_SUBJECT)
 			: null,
 		contentType: parsed.data.contentType,
+		...(parsed.data.evidence ? { evidence: parsed.data.evidence } : {}),
 	};
 }
 

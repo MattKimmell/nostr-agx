@@ -1,10 +1,15 @@
 import { describe, expect, it } from "vitest";
-import { AgxBodyTooLongError } from "./errors";
+import { AgxBodyTooLongError, AgxEvidenceInvalidError } from "./errors";
 import {
 	buildExchangePayload,
 	buildReceiptPayload,
 	DEFAULT_CONTENT_TYPE,
+	exchangeEvidenceProblem,
 	MAX_BODY,
+	MAX_EVIDENCE_FIELDS,
+	MAX_EVIDENCE_NAME,
+	MAX_EVIDENCE_RECORDS,
+	MAX_EVIDENCE_VALUE,
 	MAX_INBOUND_BODY,
 	MAX_SUBJECT,
 	parseExchangePayload,
@@ -121,6 +126,205 @@ describe("exchange message payload", () => {
 					`autoDepth: ${String(bad)}`,
 				).not.toHaveProperty("autoDepth");
 			}
+		});
+	});
+
+	describe("evidence", () => {
+		const base = { text: "hello", contextId: "ctx1", messageId: "m1" };
+		const record = {
+			key: { field: "roNumber", value: "0057658556" },
+			fields: { status: "Repair In Process", branch: "Eastside", bays: 2 },
+			observedAt: "2026-10-20T14:03:11.000Z",
+			source: "DMS",
+		};
+		const evidence = { v: 1 as const, records: [record] };
+
+		function withFields(count: number): Record<string, string> {
+			return Object.fromEntries(
+				Array.from({ length: count }, (_, i) => [`f${i}`, "x"]),
+			);
+		}
+
+		it("round-trips through the wire as sent", () => {
+			const payload = buildExchangePayload({ ...base, evidence });
+			const parsed = parseExchangePayload(
+				JSON.parse(JSON.stringify(payload)),
+			);
+			expect(parsed?.evidence).toEqual(evidence);
+			expect(parsed?.text).toBe("hello");
+		});
+
+		// Absent, not `evidence: undefined` or `null`, so a sender without evidence
+		// signs exactly the bytes it signed before this member existed.
+		it("leaves a payload without evidence byte-identical", () => {
+			const payload = buildExchangePayload(base);
+			expect(payload).not.toHaveProperty("evidence");
+			expect(JSON.stringify(payload)).toBe(
+				JSON.stringify({
+					v: 1,
+					kind: "message",
+					contentType: DEFAULT_CONTENT_TYPE,
+					role: "user",
+					messageId: "m1",
+					contextId: "ctx1",
+					parts: [{ text: "hello" }],
+					subject: null,
+				}),
+			);
+		});
+
+		it("parses a payload without evidence as before", () => {
+			const parsed = parseExchangePayload(buildExchangePayload(base));
+			expect(parsed).toStrictEqual({
+				text: "hello",
+				contextId: "ctx1",
+				messageId: "m1",
+				subject: null,
+				autoDepth: null,
+				contentType: DEFAULT_CONTENT_TYPE,
+			});
+		});
+
+		// The `autoDepth` rule again: evidence never affects delivery. It is
+		// dropped WHOLE, never down to the records that happened to parse.
+		it("drops unreadable evidence whole and still delivers the message", () => {
+			const payload = buildExchangePayload(base);
+			const cases: [string, unknown][] = [
+				["a string", "verified"],
+				["null", null],
+				["an unknown version", { ...evidence, v: 2 }],
+				["no records", { v: 1, records: [] }],
+				["records not an array", { v: 1, records: record }],
+				[
+					"too many records",
+					{ v: 1, records: Array(MAX_EVIDENCE_RECORDS + 1).fill(record) },
+				],
+				["no fields", { v: 1, records: [{ ...record, fields: {} }] }],
+				[
+					"too many fields",
+					{
+						v: 1,
+						records: [
+							{ ...record, fields: withFields(MAX_EVIDENCE_FIELDS + 1) },
+						],
+					},
+				],
+				[
+					"an over-long value",
+					{
+						v: 1,
+						records: [
+							{
+								...record,
+								fields: { status: "x".repeat(MAX_EVIDENCE_VALUE + 1) },
+							},
+						],
+					},
+				],
+				[
+					"an over-long field name",
+					{
+						v: 1,
+						records: [
+							{
+								...record,
+								fields: { ["x".repeat(MAX_EVIDENCE_NAME + 1)]: "ok" },
+							},
+						],
+					},
+				],
+				[
+					"a nested field value",
+					{ v: 1, records: [{ ...record, fields: { status: { a: 1 } } }] },
+				],
+				[
+					"a boolean key value",
+					{
+						v: 1,
+						records: [{ ...record, key: { field: "id", value: true } }],
+					},
+				],
+				[
+					"a non-ISO observedAt",
+					{ v: 1, records: [{ ...record, observedAt: "yesterday" }] },
+				],
+				[
+					"one bad record among good ones",
+					{ v: 1, records: [record, { ...record, observedAt: 7 }] },
+				],
+			];
+			for (const [label, bad] of cases) {
+				const parsed = parseExchangePayload({ ...payload, evidence: bad });
+				expect(parsed, label).not.toBeNull();
+				expect(parsed?.text, label).toBe("hello");
+				expect(parsed?.evidence, label).toBeUndefined();
+				expect(parsed, label).not.toHaveProperty("evidence");
+			}
+		});
+
+		it("accepts evidence exactly at its caps", () => {
+			const atCaps = {
+				v: 1 as const,
+				records: Array.from({ length: MAX_EVIDENCE_RECORDS }, () => ({
+					key: {
+						field: "k".repeat(MAX_EVIDENCE_NAME),
+						value: "v".repeat(MAX_EVIDENCE_VALUE),
+					},
+					fields: Object.fromEntries(
+						Array.from({ length: MAX_EVIDENCE_FIELDS }, (_, i) => [
+							`${i}`.padEnd(MAX_EVIDENCE_NAME, "n"),
+							"v".repeat(MAX_EVIDENCE_VALUE),
+						]),
+					),
+					observedAt: "2026-10-20T10:03:11-04:00",
+					source: "s".repeat(MAX_EVIDENCE_NAME),
+				})),
+			};
+			expect(exchangeEvidenceProblem(atCaps)).toBeNull();
+			const payload = buildExchangePayload({ ...base, evidence: atCaps });
+			expect(parseExchangePayload(payload)?.evidence).toEqual(atCaps);
+		});
+
+		// A sender must not sign evidence the receiver will drop: the caller
+		// would believe it delivered records nobody can see.
+		it("refuses evidence past its caps at the sender", () => {
+			const tooMany = {
+				v: 1 as const,
+				records: Array(MAX_EVIDENCE_RECORDS + 1).fill(record),
+			};
+			expect(exchangeEvidenceProblem(tooMany)).toContain("records");
+			expect(() =>
+				buildExchangePayload({ ...base, evidence: tooMany }),
+			).toThrow(AgxEvidenceInvalidError);
+
+			const tooLong = {
+				v: 1 as const,
+				records: [
+					{ ...record, fields: { note: "x".repeat(MAX_EVIDENCE_VALUE + 1) } },
+				],
+			};
+			expect(exchangeEvidenceProblem(tooLong)).toContain(
+				"records.0.fields.note",
+			);
+			expect(() =>
+				buildExchangePayload({ ...base, evidence: tooLong }),
+			).toThrow(AgxEvidenceInvalidError);
+
+			expect(exchangeEvidenceProblem(undefined)).toBeNull();
+			expect(exchangeEvidenceProblem(evidence)).toBeNull();
+		});
+
+		// What ships is the parsed copy, so a caller's internal bookkeeping
+		// cannot leak to another organization by riding along on a record.
+		it("signs only the members the schema names", () => {
+			const withExtras = {
+				v: 1 as const,
+				records: [{ ...record, toolCallId: "call_123" }],
+				internal: true,
+			};
+			const payload = buildExchangePayload({ ...base, evidence: withExtras });
+			expect(JSON.stringify(payload)).not.toContain("call_123");
+			expect(payload.evidence).toEqual(evidence);
 		});
 	});
 

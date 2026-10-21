@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.5.0
+
+No CLI changes. Released with `@nostr-agx/core` and `@nostr-agx/nostr` 0.5.0, which add the optional `evidence` member to the message payload (see "Evidence" in the core `SPEC.md`). `agx` does not send or show evidence yet.
+
+For code that calls `@nostr-agx/nostr` directly: `exchangeMessagePlaintextBytes` now throws `AgxEvidenceInvalidError` when given evidence outside the schema. Check it with `exchangeEvidenceProblem` first, as `NostrTransport.publishMessage` does.
+
 ## 0.4.0
 
 ### Added

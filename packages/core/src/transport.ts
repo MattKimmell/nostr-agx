@@ -1,4 +1,8 @@
-import type { ParsedExchangeMessage, ReceiptPayload } from "./wire";
+import type {
+	ExchangeEvidence,
+	ParsedExchangeMessage,
+	ReceiptPayload,
+} from "./wire";
 
 /**
  * The transport seam. A binding (e.g. `@nostr-agx/nostr`) implements confidential,
@@ -48,6 +52,10 @@ export interface AgxTransport {
 			 * for anything a human authored, approved or asked for. See
 			 * "Automated-reply depth" in SPEC.md. */
 			autoDepth?: number;
+			/** Records quoted in support of `text`. Sender-declared; see
+			 * "Evidence" in SPEC.md. Counted in the size check, and refused
+			 * (`ok: false`) when it does not fit the wire schema. */
+			evidence?: ExchangeEvidence;
 		},
 	): Promise<{
 		ok: boolean;

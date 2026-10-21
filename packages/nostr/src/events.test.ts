@@ -1,4 +1,10 @@
-import { MAX_BODY } from "@nostr-agx/core";
+import {
+	AgxEvidenceInvalidError,
+	MAX_BODY,
+	MAX_EVIDENCE_FIELDS,
+	MAX_EVIDENCE_RECORDS,
+	MAX_EVIDENCE_VALUE,
+} from "@nostr-agx/core";
 import { verifyEvent } from "nostr-tools";
 import { describe, expect, it } from "vitest";
 import {
@@ -12,6 +18,7 @@ import {
 	signMessageEvent,
 	worstCaseEventBytes,
 } from "./events";
+import { unwrapRumor } from "./giftwrap";
 import { generateKeypair } from "./keys";
 import { CARD_KIND, DELETION_KIND } from "./kinds";
 import { NostrTransport } from "./nostr-transport";
@@ -183,6 +190,126 @@ describe("message size guard (NIP-44 plaintext cap)", () => {
 			relays: [],
 		});
 		expect(transport.canCarry("a".repeat(MAX_BODY))).toBe(true);
+	});
+});
+
+describe("evidence in the size guard", () => {
+	const record = {
+		key: { field: "roNumber", value: "0057658556" },
+		fields: { status: "Repair In Process", branch: "Eastside" },
+		observedAt: "2026-10-20T14:03:11.000Z",
+		source: "DMS",
+	};
+	function evidenceOf(records: number, valueChars = 20) {
+		return {
+			v: 1 as const,
+			records: Array.from({ length: records }, () => ({
+				...record,
+				fields: Object.fromEntries(
+					Array.from({ length: MAX_EVIDENCE_FIELDS }, (_, i) => [
+						`field${i}`,
+						"x".repeat(valueChars),
+					]),
+				),
+			})),
+		};
+	}
+
+	// The guard must measure the rumor that is signed. Measured without the
+	// evidence it under-counts, and a message near the limit passes the guard
+	// and is refused by the recipient's relay.
+	it("measures the rumor that is actually signed, evidence included", async () => {
+		const evidence = evidenceOf(5);
+		const text = "hello there";
+		const { event } = await signMessageEvent({
+			signer: localSigner(sender.secretKey),
+			recipientPubkey: recipient.publicKey,
+			text,
+			evidence,
+			nowSec: 1000,
+		});
+		const unwrapped = await unwrapRumor({
+			signer: localSigner(recipient.secretKey),
+			event,
+		});
+		const signedBytes = new TextEncoder().encode(
+			JSON.stringify(unwrapped?.rumor),
+		).length;
+
+		const measured = exchangeMessagePlaintextBytes(text, { evidence });
+		const withoutEvidence = exchangeMessagePlaintextBytes(text);
+		expect(measured).toBeGreaterThanOrEqual(signedBytes);
+		expect(withoutEvidence).toBeLessThan(signedBytes);
+		// Escaped twice (payload, then rumor), so it costs more than its JSON.
+		expect(measured - withoutEvidence).toBeGreaterThan(
+			JSON.stringify(evidence).length,
+		);
+	});
+
+	it("publishMessage refuses a body that fits only without its evidence", async () => {
+		const transport = await NostrTransport.create({
+			signer: localSigner(sender.secretKey),
+			relays: [],
+		});
+		const text = "a".repeat(20_000);
+		expect(transport.canCarry(text)).toBe(true);
+
+		const res = await transport.publishMessage(recipient.publicKey, {
+			text,
+			evidence: evidenceOf(10, 100),
+		});
+		expect(res.ok).toBe(false);
+		expect(res.accepted).toBe(0);
+		const error = res.errors.join(" ");
+		expect(error).toContain(String(INTEROP_MAX_EVENT_BYTES));
+		expect(error).toContain("cite fewer evidence records");
+		// Still names a character target for the body, scaled to what the
+		// evidence leaves rather than to the whole budget.
+		const target = Number(/roughly (\d+) characters/.exec(error)?.[1]);
+		expect(target).toBeGreaterThan(0);
+		expect(target).toBeLessThan(text.length);
+	});
+
+	it("publishMessage says so when the evidence alone is over the budget", async () => {
+		const transport = await NostrTransport.create({
+			signer: localSigner(sender.secretKey),
+			relays: [],
+		});
+		const res = await transport.publishMessage(recipient.publicKey, {
+			text: "short",
+			evidence: evidenceOf(MAX_EVIDENCE_RECORDS, MAX_EVIDENCE_VALUE),
+		});
+		expect(res.ok).toBe(false);
+		expect(res.errors.join(" ")).toContain("The evidence alone takes");
+	});
+
+	it("publishMessage refuses evidence outside the schema instead of throwing", async () => {
+		const transport = await NostrTransport.create({
+			signer: localSigner(sender.secretKey),
+			relays: [],
+		});
+		const res = await transport.publishMessage(recipient.publicKey, {
+			text: "short",
+			evidence: {
+				v: 1,
+				records: [{ ...record, observedAt: "last Tuesday" }],
+			},
+		});
+		expect(res.ok).toBe(false);
+		expect(res.accepted).toBe(0);
+		expect(res.errors.join(" ")).toContain("records.0.observedAt");
+	});
+
+	it("signMessageEvent refuses evidence outside the schema", async () => {
+		await expect(
+			signMessageEvent({
+				signer: localSigner(sender.secretKey),
+				recipientPubkey: recipient.publicKey,
+				text: "short",
+				evidence: evidenceOf(MAX_EVIDENCE_RECORDS + 1),
+				nowSec: 1000,
+			}),
+		).rejects.toThrow(AgxEvidenceInvalidError);
 	});
 });
 
