@@ -3,7 +3,13 @@ import {
 	type AgxPollResult,
 	type AgxResolvedPeer,
 	type AgxTransport,
+	type ExchangeEvidence,
+	exchangeEvidenceProblem,
 	MAX_BODY,
+	MAX_EVIDENCE_FIELDS,
+	MAX_EVIDENCE_RECORDS,
+	MAX_EVIDENCE_VALUE,
+	type ReceiptStatus,
 } from "@nostr-agx/core";
 import type { Event } from "nostr-tools";
 import { normalizePubkey } from "./address";
@@ -21,6 +27,7 @@ import {
 	exchangeMessagePlaintextBytes,
 	INTEROP_MAX_EVENT_BYTES,
 	INTEROP_MAX_PLAINTEXT_BYTES,
+	isIgnorableReceiptRumor,
 	openMessageRumor,
 	openReceiptRumor,
 	signMessageEvent,
@@ -197,6 +204,7 @@ export class NostrTransport implements AgxTransport {
 			contextId?: string | null;
 			contentType?: string;
 			autoDepth?: number;
+			evidence?: ExchangeEvidence;
 		},
 	): Promise<{
 		ok: boolean;
@@ -256,6 +264,8 @@ export class NostrTransport implements AgxTransport {
 		// a real `randomId()` of 32 — ~168 bytes of slack in the other
 		// direction. Stated because the next reader would otherwise either trust
 		// a claim the code does not make, or re-derive the slack from scratch.
+		// `evidence` IS measured: it can run to many kilobytes, more than the
+		// whole budget at its caps.
 
 		// CHARACTERS FIRST, and the ordering is the whole point. Every byte
 		// measurement below runs through `buildExchangePayload`, which used to
@@ -286,14 +296,47 @@ export class NostrTransport implements AgxTransport {
 				rejected: [],
 			};
 		}
+		// Before measuring, for the same reason as the character check: the
+		// measurement builds the payload, and the builder throws on evidence a
+		// receiver would drop.
+		const evidenceProblem = exchangeEvidenceProblem(message.evidence);
+		if (evidenceProblem) {
+			const msg =
+				`Message evidence is invalid (${evidenceProblem}). ` +
+				`It allows ${MAX_EVIDENCE_RECORDS} records of 1 to ${MAX_EVIDENCE_FIELDS} fields, ` +
+				`values up to ${MAX_EVIDENCE_VALUE} characters and an ISO 8601 observedAt.`;
+			this.logger?.warn?.("AGX: message evidence is invalid", {
+				problem: evidenceProblem,
+			});
+			return {
+				ok: false,
+				eventId: "",
+				contextId: message.contextId ?? "",
+				accepted: 0,
+				total: 0,
+				errors: [msg],
+				rejected: [],
+			};
+		}
 		const plaintextBytes = exchangeMessagePlaintextBytes(message.text, {
 			contentType: message.contentType,
 			subject: message.subject ?? null,
+			evidence: message.evidence,
 		});
 		if (worstCaseEventBytes(plaintextBytes) > INTEROP_MAX_EVENT_BYTES) {
 			// The SAME measurement the guard rejected on, so the explanation and
 			// the decision cannot disagree.
 			const bytes = plaintextBytes;
+			// What the evidence costs, so the target below is a target for the
+			// TEXT: scaling the whole size by the text's length would ask for a
+			// cut the evidence alone can make impossible.
+			const evidenceBytes = message.evidence
+				? bytes -
+					exchangeMessagePlaintextBytes(message.text, {
+						contentType: message.contentType,
+						subject: message.subject ?? null,
+					})
+				: 0;
 			// NAME A CHARACTER TARGET, because bytes are not actionable by the
 			// caller. `MAX_BODY` is advertised verbatim in the tool schema the
 			// model reads (intrinsic-skills/skills/external-messaging.ts), but
@@ -306,16 +349,25 @@ export class NostrTransport implements AgxTransport {
 			// out how much to cut. Serialization is near-linear in the escape ratio, so scaling
 			// the length by how far over we are gives a usable target.
 			const suggestedChars = Math.floor(
-				message.text.length * (INTEROP_MAX_PLAINTEXT_BYTES / bytes),
+				message.text.length *
+					((INTEROP_MAX_PLAINTEXT_BYTES - evidenceBytes) /
+						(bytes - evidenceBytes)),
 			);
+			let advice = `Shorten the body to roughly ${suggestedChars} characters or fewer`;
+			if (evidenceBytes > 0) {
+				advice =
+					suggestedChars > 0
+						? `${advice}, or cite fewer evidence records (they take ${evidenceBytes} bytes)`
+						: `The evidence alone takes ${evidenceBytes} bytes of the ${INTEROP_MAX_PLAINTEXT_BYTES}-byte budget: cite fewer evidence records or fields`;
+			}
 			const msg =
 				`Message is too large to be deliverable: it serializes to ${bytes} bytes, ` +
 				`producing a ~${worstCaseEventBytes(bytes)}-byte event, over the ` +
 				`${INTEROP_MAX_EVENT_BYTES}-byte limit a default-configured relay accepts. ` +
-				`Shorten the body to roughly ${suggestedChars} characters or fewer — ` +
-				"a relay that rejects it will not tell the sender.";
+				`${advice} — a relay that rejects it will not tell the sender.`;
 			this.logger?.warn?.("AGX: message too large to be deliverable", {
 				bytes,
+				evidenceBytes,
 				limit: INTEROP_MAX_EVENT_BYTES,
 			});
 			return {
@@ -340,6 +392,7 @@ export class NostrTransport implements AgxTransport {
 				contextId: message.contextId ?? null,
 				contentType: message.contentType,
 				autoDepth: message.autoDepth,
+				evidence: message.evidence,
 				nowSec: nowSec(),
 			});
 			event = signed.event;
@@ -503,7 +556,8 @@ export class NostrTransport implements AgxTransport {
 		receipt: {
 			refEventId: string;
 			contextId: string;
-			status: "delivered" | "quarantined";
+			status: ReceiptStatus;
+			readAt?: string;
 		},
 	): Promise<{ ok: boolean }> {
 		const recipient = normalizePubkey(to);
@@ -516,6 +570,7 @@ export class NostrTransport implements AgxTransport {
 			refEventId: receipt.refEventId,
 			contextId: receipt.contextId,
 			status: receipt.status,
+			readAt: receipt.readAt,
 			nowSec: nowSec(),
 		});
 		// Mirrors publishMessage's routing: a peer polling only their own
@@ -592,6 +647,13 @@ export class NostrTransport implements AgxTransport {
 				discarded.push(event.id);
 				continue;
 			}
+			// A receipt with a status a newer peer added: ignored, by the spec,
+			// rather than counted and warned about as malformed. Recorded as seen
+			// so it is not reopened on the next poll.
+			if (isIgnorableReceiptRumor(unwrapped)) {
+				discarded.push(event.id);
+				continue;
+			}
 			const receipt = openReceiptRumor(unwrapped);
 			if (receipt) {
 				receipts.push({
@@ -620,6 +682,8 @@ export class NostrTransport implements AgxTransport {
 					// loop guard reasons about; deciding here would hide the signal.
 					autoDepth: opened.autoDepth,
 					contentType: opened.contentType,
+					// Forwarded as the sender declared it; trusting it is the host's call.
+					...(opened.evidence ? { evidence: opened.evidence } : {}),
 				});
 			} else {
 				malformed += 1;

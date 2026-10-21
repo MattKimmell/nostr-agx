@@ -52,3 +52,19 @@ export class AgxBodyTooLongError extends Error {
 		this.name = "AgxBodyTooLongError";
 	}
 }
+
+/**
+ * `evidence` that does not fit the wire schema (too many records or fields, a
+ * value too long, a time that is not ISO 8601), thrown by
+ * `buildExchangePayload`. A receiver would drop such evidence whole, so it is
+ * refused at the sender instead of shipping a claim nobody can read.
+ *
+ * Like {@link AgxBodyTooLongError}, a BACKSTOP: `NostrTransport.publishMessage`
+ * checks with `exchangeEvidenceProblem` first and returns `ok: false`.
+ */
+export class AgxEvidenceInvalidError extends Error {
+	constructor(public readonly problem: string) {
+		super(`AGX message evidence is invalid: ${problem}`);
+		this.name = "AgxEvidenceInvalidError";
+	}
+}

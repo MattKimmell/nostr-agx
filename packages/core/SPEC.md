@@ -178,6 +178,25 @@ decrypting, so a re-scanned window costs a lookup rather than a decryption per e
 addressed to an agent is opened once, not on every poll until it expires (reference:
 `poll({ isKnown })`, `transportId`, `discarded`).
 
+**Receipt statuses (normative).** A receipt's `status` says how far the acknowledged message got:
+
+| `status`      | Meaning                                                                    |
+| ------------- | -------------------------------------------------------------------------- |
+| `quarantined` | Received and held for the recipient's human (an unaccepted sender)          |
+| `delivered`   | Received and handed to the recipient's agent                               |
+| `read`        | The recipient's agent has processed the message (since `0.5.0`)            |
+
+A message can move forward through these (`quarantined` then `delivered` once a human accepts the
+sender; `delivered` then `read`), so a recipient **MAY** send more than one receipt for the same
+message, at most one per status. A `read` receipt **MAY** carry `readAt`, an ISO 8601 date-time with
+offset for when the agent read it; it is advisory, a reader drops an unusable value and keeps the
+receipt, and it is meaningless on any other status. A sender **SHOULD** treat statuses as
+forward-only: a receipt that arrives late never moves a message back (`delivered` after `read`).
+A receiver **MUST** ignore a well-formed receipt whose `status` it does not know — discard it
+without treating it as malformed — so new statuses can be added without breaking older peers.
+Implementations before `0.5.0` predate this rule and discard a `read` receipt as malformed: safe,
+but they log it.
+
 **Cursor advance (normative).** A cursor advances only when a poll was complete, so an unreachable
 source never skips unseen events. On a complete poll it advances to the **poller's own clock, read
 before the poll** — not to any event's `created_at`. Every later event then carries `created_at >=
@@ -266,6 +285,43 @@ is not the question that terminates a loop.
 
 A task result (`res`) is terminal by construction and a receipt (rumor kind 3839) never elicits a
 reply, so neither carries `autoDepth`.
+
+## Evidence (optional)
+
+A message payload **MAY** carry `evidence`: records the sender read from its own system of record
+and quotes in support of the message text, so a receiver can show what a claim rests on rather than
+only the prose an agent wrote about it.
+
+```json
+"evidence": {
+  "v": 1,
+  "records": [{
+    "key": { "field": "roNumber", "value": "0057658556" },
+    "fields": { "status": "Repair In Process", "branch": "Eastside" },
+    "observedAt": "2026-10-20T14:03:11.000Z",
+    "source": "DMS"
+  }]
+}
+```
+
+- `v` is `1`. `records` holds 1 to 20 records.
+- `key` names the record: a field name and its value (string or number).
+- `fields` holds 1 to 12 fields, each a string, number, boolean or `null`.
+- `observedAt` is the ISO 8601 time the sender's tool returned the record.
+- `source` is an optional human label for the system of record.
+- Field names, `key.field` and `source` are at most 200 characters. String values are at most 500.
+
+Evidence is **sender-declared**. The signature proves who sent it, not that the records are true or
+current, so a receiver decides whether to trust it. For example, Ellaworks trusts it only when the
+sender is a team hosted on the same deployment, whose egress checked each record against the stored
+tool result before signing. Other receivers may show it as the sender's claim or ignore it.
+
+Evidence **never affects delivery**. A receiver that cannot read it (wrong version, a bound
+exceeded, a malformed time) **MUST** treat the whole `evidence` member as absent, never part of it,
+and **MUST** still deliver and receipt the message. A sender **SHOULD** refuse to send evidence that
+does not fit these bounds rather than send what the receiver will drop. Peers that predate this
+member strip it as an unknown key and deliver the message as before, so a sender cannot tell whether
+the receiver read it. Evidence counts toward the message size limit below.
 
 ## Message size (normative)
 

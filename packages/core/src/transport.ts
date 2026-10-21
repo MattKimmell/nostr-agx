@@ -1,4 +1,9 @@
-import type { ParsedExchangeMessage, ReceiptPayload } from "./wire";
+import type {
+	ExchangeEvidence,
+	ParsedExchangeMessage,
+	ReceiptPayload,
+	ReceiptStatus,
+} from "./wire";
 
 /**
  * The transport seam. A binding (e.g. `@nostr-agx/nostr`) implements confidential,
@@ -48,6 +53,10 @@ export interface AgxTransport {
 			 * for anything a human authored, approved or asked for. See
 			 * "Automated-reply depth" in SPEC.md. */
 			autoDepth?: number;
+			/** Records quoted in support of `text`. Sender-declared; see
+			 * "Evidence" in SPEC.md. Counted in the size check, and refused
+			 * (`ok: false`) when it does not fit the wire schema. */
+			evidence?: ExchangeEvidence;
 		},
 	): Promise<{
 		ok: boolean;
@@ -83,13 +92,15 @@ export interface AgxTransport {
 	 * back to a conservative built-in byte cap when it is absent. */
 	canCarry?(text: string): boolean;
 
-	/** Publish a delivery-ack receipt back to a message's sender. */
+	/** Publish a delivery-ack receipt back to a message's sender. `readAt` is
+	 * carried only with `status: "read"`. */
 	publishReceipt(
 		to: string,
 		receipt: {
 			refEventId: string;
 			contextId: string;
-			status: "delivered" | "quarantined";
+			status: ReceiptStatus;
+			readAt?: string;
 		},
 	): Promise<{ ok: boolean }>;
 
