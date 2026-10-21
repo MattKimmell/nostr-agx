@@ -81,7 +81,9 @@ tasks and saves its state first; a task cut off by the stop gets no result, and 
 
 - **Tasks run side by side:** up to 64 at once, at most 8 per webhook, each for up to the
   subscription's `resultTimeoutSec` (120 seconds unless the trigger sets another). A task that
-  waits for its webhook past `maxTaskAgeSec` gets "the workflow was busy for too long".
+  waits for its webhook past `maxTaskAgeSec` gets "the workflow was busy for too long". Up to 24
+  more tasks wait for each webhook; past that a task gets "the workflow is busy", and past 64 in
+  all "the gateway is busy", at once, so a pile-up never stops the gateway reading its inbox.
 - **At most once.** A task is recorded as handled before its webhook gets it: a crash in the
   middle costs the requester its result, never a second run.
 - **Messages and receipts** go to each webhook two at a time, with 30 seconds for each answer,

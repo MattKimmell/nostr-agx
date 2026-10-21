@@ -479,6 +479,53 @@ describe("agx gateway: inbound", () => {
 		expect(busy.held).toHaveLength(1);
 	}, 30_000);
 
+	it("refuses tasks past a webhook's queue or the gateway's limit as busy, and keeps reading the inbox", async () => {
+		// One running and one waiting per webhook, three tasks in all.
+		await gateway.close();
+		gateway = await startGateway({ ...gatewayOptions(), maxTasksWaitingPerWebhook: 1, maxTasksInFlight: 3 });
+		try {
+			const requester = await peer();
+			const slow = await heldWebhook();
+			await subscribe({ url: slow.url, events: ["task"], capabilities: ["invoice.pile"], allowedPeers: [requester.npub] });
+			const other = await heldWebhook();
+			await subscribe({ url: other.url, events: ["task"], capabilities: ["invoice.other"], allowedPeers: [requester.npub] });
+			const fast = await webhook(() => ({ status: 200, body: { fast: true } }));
+			await subscribe({ url: fast.url, events: ["task"], capabilities: ["invoice.quick"], allowedPeers: [requester.npub] });
+			const ask = (capability: string, n: number) => {
+				const result = requester.client.request(gateway.npub, capability, { n }, { timeoutMs: 25_000 });
+				result.catch(() => undefined);
+				return result;
+			};
+
+			const running = ask("invoice.pile", 1);
+			await waitFor(() => slow.held.length === 1);
+			const waiting = ask("invoice.pile", 2);
+			await new Promise((r) => setTimeout(r, 1000));
+			// The slow webhook's queue is full: refused at once, not held.
+			await expect(pumping(ask("invoice.pile", 3), requester.client)).rejects.toThrow("the workflow is busy");
+			// The inbox is still read: another webhook's task runs.
+			await expect(pumping(ask("invoice.quick", 4), requester.client)).resolves.toEqual({ fast: true });
+
+			const otherRunning = ask("invoice.other", 5);
+			await waitFor(() => other.held.length === 1);
+			// Three tasks in flight: the gateway refuses the next, wherever it goes.
+			await expect(pumping(ask("invoice.quick", 6), requester.client)).rejects.toThrow("the gateway is busy");
+
+			slow.answer(0, { n: 1 });
+			await expect(pumping(running, requester.client)).resolves.toEqual({ n: 1 });
+			await waitFor(() => slow.held.length === 2);
+			slow.answer(1, { n: 2 });
+			await expect(pumping(waiting, requester.client)).resolves.toEqual({ n: 2 });
+			other.answer(0, { n: 5 });
+			await expect(pumping(otherRunning, requester.client)).resolves.toEqual({ n: 5 });
+			expect(slow.held).toHaveLength(2);
+			expect(fast.received).toHaveLength(1);
+		} finally {
+			await gateway.close();
+			gateway = await startGateway(gatewayOptions());
+		}
+	}, 60_000);
+
 	it("answers `result too large` for a workflow answer it could never send on", async () => {
 		const requester = await peer();
 		const hook = await webhook(() => ({ status: 200, body: "x".repeat(1_100_000) }));

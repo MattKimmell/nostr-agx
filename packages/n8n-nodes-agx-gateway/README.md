@@ -204,9 +204,10 @@ data is not sent.
   workflow did not finish in time". Keep it below the requesters' own timeouts where you can — the
   AGX nodes and the CLI wait 30 seconds by default.
 - **Tasks run side by side.** A slow workflow holds up neither other workflows nor messages. Each
-  workflow runs up to 8 tasks at once and the rest wait their turn; a task that waited past
+  workflow runs up to 8 tasks at once and up to 24 more wait their turn; a task that waited past
   **Ignore Tasks Older Than** fails with "the workflow was busy for too long" rather than running
-  for a requester that has stopped waiting. A message or receipt does not wait for its workflow
+  for a requester that has stopped waiting. Past those 24, a task fails with "the workflow is busy"
+  at once, and past 64 tasks across all workflows with "the gateway is busy". A message or receipt does not wait for its workflow
   to finish, and its delivery is retried three times, over about 40 seconds, when n8n cannot be
   reached.
 - **Ignore Tasks Older Than (Minutes)** (10): a request sent longer ago than this when the gateway

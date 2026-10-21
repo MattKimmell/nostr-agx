@@ -15,11 +15,14 @@ describe("KeyedSlots", () => {
 		await new Promise((r) => setTimeout(r, 5));
 		expect(third).toBeNull();
 		expect(slots.inUse("a")).toBe(2);
+		expect(slots.waiting("a")).toBe(1);
+		expect(slots.waiting("b")).toBe(0);
 
 		first();
 		first(); // a second call frees nothing more
 		await waiting;
 		expect(third).not.toBeNull();
+		expect(slots.waiting("a")).toBe(0);
 		expect(slots.inUse("a")).toBe(2);
 		second();
 		(third as unknown as () => void)();
