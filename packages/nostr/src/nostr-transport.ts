@@ -9,6 +9,7 @@ import {
 	MAX_EVIDENCE_FIELDS,
 	MAX_EVIDENCE_RECORDS,
 	MAX_EVIDENCE_VALUE,
+	type ReceiptStatus,
 } from "@nostr-agx/core";
 import type { Event } from "nostr-tools";
 import { normalizePubkey } from "./address";
@@ -26,6 +27,7 @@ import {
 	exchangeMessagePlaintextBytes,
 	INTEROP_MAX_EVENT_BYTES,
 	INTEROP_MAX_PLAINTEXT_BYTES,
+	isIgnorableReceiptRumor,
 	openMessageRumor,
 	openReceiptRumor,
 	signMessageEvent,
@@ -554,7 +556,8 @@ export class NostrTransport implements AgxTransport {
 		receipt: {
 			refEventId: string;
 			contextId: string;
-			status: "delivered" | "quarantined";
+			status: ReceiptStatus;
+			readAt?: string;
 		},
 	): Promise<{ ok: boolean }> {
 		const recipient = normalizePubkey(to);
@@ -567,6 +570,7 @@ export class NostrTransport implements AgxTransport {
 			refEventId: receipt.refEventId,
 			contextId: receipt.contextId,
 			status: receipt.status,
+			readAt: receipt.readAt,
 			nowSec: nowSec(),
 		});
 		// Mirrors publishMessage's routing: a peer polling only their own
@@ -640,6 +644,13 @@ export class NostrTransport implements AgxTransport {
 			}
 			if (!unwrapped) {
 				unopenable += 1;
+				discarded.push(event.id);
+				continue;
+			}
+			// A receipt with a status a newer peer added: ignored, by the spec,
+			// rather than counted and warned about as malformed. Recorded as seen
+			// so it is not reopened on the next poll.
+			if (isIgnorableReceiptRumor(unwrapped)) {
 				discarded.push(event.id);
 				continue;
 			}

@@ -2,7 +2,12 @@
 
 ## 0.5.0
 
-No CLI changes. Released with `@nostr-agx/core` and `@nostr-agx/nostr` 0.5.0, which add the optional `evidence` member to the message payload (see "Evidence" in the core `SPEC.md`). `agx` does not send or show evidence yet.
+Released with `@nostr-agx/core` and `@nostr-agx/nostr` 0.5.0, which add the optional `evidence` member to the message payload (see "Evidence" in the core `SPEC.md`) and a `read` receipt status with an optional `readAt` (see "Receipt statuses"). `agx` does not send or show evidence yet, and does not send `read` receipts.
+
+### Changed
+
+- A sent message's delivery status only moves forward (sent, quarantined, delivered, read), so a `delivered` receipt that arrives after a `read` one no longer marks the message unread again.
+- A receipt with a status this version does not know is ignored instead of being logged as a malformed gift wrap.
 
 ## 0.4.0
 
