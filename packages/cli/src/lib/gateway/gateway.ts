@@ -69,6 +69,12 @@ export interface GatewayOptions {
 	deliveryRetryDelaysMs?: number[];
 	/** Tasks one webhook runs at once; the rest wait their turn. Default 8. */
 	maxTasksPerWebhook?: number;
+	/** Tasks that wait for one webhook at once; past it, a task is answered
+	 * that the workflow is busy. Default 24. */
+	maxTasksWaitingPerWebhook?: number;
+	/** Tasks the gateway runs or holds at once; past it, a task is answered
+	 * that the gateway is busy. Default 64. */
+	maxTasksInFlight?: number;
 }
 
 export interface RunningGateway {
@@ -86,9 +92,11 @@ export const DEFAULT_GATEWAY_PORT = 8787;
 const CARD_SETTLE_MS = 1_100;
 /** How long before a card no relay accepted is published again. */
 const CARD_RETRY_MS = 30_000;
-/** Tasks the gateway takes on at once; past it, reading the inbox waits. */
+/** Tasks the gateway runs or holds at once; past it, a task is refused as busy
+ * instead of holding up the inbox. */
 const MAX_TASKS_IN_FLIGHT = 64;
 const DEFAULT_TASKS_PER_WEBHOOK = 8;
+const DEFAULT_TASKS_WAITING_PER_WEBHOOK = 24;
 /** /v1/health reports unhealthy once no poll has finished for this long, or
  * for ten poll intervals if that is longer. */
 const HEALTH_STALE_MIN_MS = 60_000;
@@ -171,13 +179,31 @@ export async function startGateway(options: GatewayOptions): Promise<RunningGate
 		};
 
 		// Tasks run side by side, each webhook in its own slots: a slow workflow
-		// holds up neither the inbox nor the other webhooks.
+		// holds up neither the inbox nor the other webhooks. Both queues are
+		// bounded and refuse what does not fit, so a pile-up never reaches the
+		// limit `AgxClient` holds the inbox at.
 		const webhookSlots = new KeyedSlots(options.maxTasksPerWebhook ?? DEFAULT_TASKS_PER_WEBHOOK);
+		const maxWaitingPerWebhook = options.maxTasksWaitingPerWebhook ?? DEFAULT_TASKS_WAITING_PER_WEBHOOK;
+		const maxInFlight = options.maxTasksInFlight ?? MAX_TASKS_IN_FLIGHT;
+		let inFlight = 0;
 		// When the current poll started: a task's age is measured from when it
 		// was fetched, not from when its turn came.
 		let polledAt = nowSec();
 
 		const runTask = async (task: Task): Promise<unknown> => {
+			if (inFlight >= maxInFlight) {
+				log(`BUSY  ${task.capability} from ${toNpub(task.from)}: ${inFlight} tasks in flight`);
+				throw new AgxPublicError("the gateway is busy");
+			}
+			inFlight++;
+			try {
+				return await deliverTask(task);
+			} finally {
+				inFlight--;
+			}
+		};
+
+		const deliverTask = async (task: Task): Promise<unknown> => {
 			const targets = subscriptions.forTask(task.capability, task.from, task.sentAt ?? polledAt, polledAt);
 			if (targets.length === 0) {
 				// The subscription went away between authorization and now.
@@ -194,6 +220,10 @@ export async function startGateway(options: GatewayOptions): Promise<RunningGate
 			seen.flush();
 			log(`TASK  ${task.capability} from ${toNpub(task.from)}`);
 			for (const subscription of targets) {
+				if (webhookSlots.waiting(subscription.id) >= maxWaitingPerWebhook) {
+					log(`BUSY  ${task.capability} from ${toNpub(task.from)}: ${subscription.id} has a full queue`);
+					throw new AgxPublicError("the workflow is busy");
+				}
 				const release = await webhookSlots.acquire(subscription.id);
 				let outcome: Awaited<ReturnType<typeof deliver>>;
 				try {
@@ -255,7 +285,9 @@ export async function startGateway(options: GatewayOptions): Promise<RunningGate
 			// First run: from now. The poll still reaches back the full lookback,
 			// and what is too old for a webhook is filtered below.
 			startCursor: state.cursor > 0 ? state.cursor : nowSec(),
-			maxConcurrentTasks: MAX_TASKS_IN_FLIGHT,
+			// Above the gateway's own limit: tasks it refuses as busy still take a
+			// moment to answer, and must not hold up the inbox meanwhile.
+			maxConcurrentTasks: maxInFlight * 2,
 			// A task request every webhook serving it considers too old: dropped
 			// before authorization, with no receipt and no reply.
 			ignore: (event) => {

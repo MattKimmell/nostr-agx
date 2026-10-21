@@ -435,7 +435,9 @@ multicast or unspecified address, such as a cloud metadata service.
   `resultTimeoutSec` as "the workflow did not finish in time". Tasks run side by side, up to 8
   at once per webhook, so a slow workflow holds up neither the other webhooks nor messages; a task
   that waited for its webhook past `maxTaskAgeSec` fails with "the workflow was busy for too
-  long". Each task runs at most once: it is recorded as handled before its webhook gets it, so if
+  long". At most 24 tasks wait for one webhook and 64 are in flight in all; past either, a task
+  fails at once with "the workflow is busy" or "the gateway is busy", so a pile-up never stops
+  the gateway reading its inbox. Each task runs at most once: it is recorded as handled before its webhook gets it, so if
   the gateway stops or crashes while the workflow runs, the requester gets no result — its
   timeout covers that — and the workflow is not run again.
 - **A message or receipt** is POSTed to every subscription that wants it, in the background, two

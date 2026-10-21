@@ -58,6 +58,11 @@ export class KeyedSlots {
 		this.queued.clear();
 	}
 
+	/** Callers waiting for a slot for `key`. */
+	waiting(key: string): number {
+		return this.queued.get(key)?.length ?? 0;
+	}
+
 	/** Slots held for `key` (tests). */
 	inUse(key: string): number {
 		return this.held.get(key) ?? 0;
