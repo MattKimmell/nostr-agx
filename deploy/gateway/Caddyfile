@@ -1,0 +1,5 @@
+# HTTPS for the gateway, with a certificate Caddy obtains and renews itself.
+{$AGX_DOMAIN} {
+	# A task request waits for its result, up to an hour: no proxy timeout.
+	reverse_proxy gateway:8787
+}

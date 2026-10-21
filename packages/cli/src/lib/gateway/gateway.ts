@@ -89,6 +89,11 @@ const CARD_RETRY_MS = 30_000;
 /** Tasks the gateway takes on at once; past it, reading the inbox waits. */
 const MAX_TASKS_IN_FLIGHT = 64;
 const DEFAULT_TASKS_PER_WEBHOOK = 8;
+/** /v1/health reports unhealthy once no poll has finished for this long, or
+ * for ten poll intervals if that is longer. */
+const HEALTH_STALE_MIN_MS = 60_000;
+/** How long stopping waits for the poll, running tasks and the card. */
+const SHUTDOWN_WAIT_MS = 8_000;
 
 function nowSec(): number {
 	return Math.floor(Date.now() / 1000);
@@ -341,8 +346,13 @@ export async function startGateway(options: GatewayOptions): Promise<RunningGate
 			updateState(name, { cursor, lastPumpAt: new Date().toISOString() });
 		};
 		let wake: (() => void) | null = null;
+		const interval = options.pollIntervalMs ?? 3000;
+		// For /v1/health: when a poll last finished, and when every relay last
+		// answered one. A poll that throws (a disk that cannot be written, say)
+		// does not count.
+		let lastPollAt: number | null = null;
+		let lastCompletePollAt: number | null = null;
 		const runPump = async () => {
-			const interval = options.pollIntervalMs ?? 3000;
 			while (!closed) {
 				try {
 					refreshAllowed();
@@ -353,6 +363,10 @@ export async function startGateway(options: GatewayOptions): Promise<RunningGate
 						cursor = result.cursor;
 					}
 					persist();
+					lastPollAt = Date.now();
+					if (result.complete) {
+						lastCompletePollAt = lastPollAt;
+					}
 				} catch (error) {
 					log(`poll failed: ${error instanceof Error ? error.message : String(error)}`);
 				}
@@ -374,7 +388,18 @@ export async function startGateway(options: GatewayOptions): Promise<RunningGate
 			const method = req.method ?? "GET";
 			const path = url.pathname.replace(/\/+$/, "") || "/";
 			if (method === "GET" && path === "/v1/health") {
-				sendJson(res, 200, { ok: true });
+				// 503 while no poll has finished lately (starting up, or wedged), for a
+				// container health check or an uptime monitor. A relay that does not
+				// answer only degrades it: the others still carry traffic.
+				const staleAfterMs = Math.max(HEALTH_STALE_MIN_MS, 10 * interval);
+				const recent = (at: number | null) => at !== null && Date.now() - at <= staleAfterMs;
+				const ok = recent(lastPollAt);
+				sendJson(res, ok ? 200 : 503, {
+					ok,
+					allRelaysAnswering: recent(lastCompletePollAt),
+					lastPollAt: lastPollAt === null ? null : new Date(lastPollAt).toISOString(),
+					version: AGX_CLI_VERSION,
+				});
 				return;
 			}
 			if (!path.startsWith("/v1/")) {
@@ -488,10 +513,22 @@ export async function startGateway(options: GatewayOptions): Promise<RunningGate
 				server.closeAllConnections();
 			});
 			requester.stop();
-			await Promise.race([
-				Promise.all([pumpLoop, publishing, client.tasksSettled()]),
-				new Promise((resolve) => setTimeout(resolve, 10_000)),
-			]);
+			// One budget for the whole stop, under the 10 s a container runtime
+			// gives before it kills the process.
+			let timer: ReturnType<typeof setTimeout> | undefined;
+			const deadline = new Promise<void>((resolve) => {
+				timer = setTimeout(resolve, SHUTDOWN_WAIT_MS);
+			});
+			await Promise.race([pumpLoop, deadline]);
+			// On disk before waiting for running tasks: a kill from here on loses
+			// nothing (a running task is already recorded as handled).
+			try {
+				persist();
+			} catch (error) {
+				log(`state could not be saved: ${error instanceof Error ? error.message : String(error)}`);
+			}
+			await Promise.race([Promise.all([publishing, client.tasksSettled()]), deadline]);
+			clearTimeout(timer);
 			await client.stop().catch(() => undefined);
 		};
 

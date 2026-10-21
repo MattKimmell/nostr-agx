@@ -53,9 +53,10 @@ agx.example.com {
 }
 ```
 
-The gateway must also be able to reach n8n's webhook URLs, which on n8n Cloud it can. More on the
-gateway — keys, subscriptions, what it keeps on disk — is in the
-[CLI's README](../cli#behind-an-http-api-agx-gateway).
+The gateway must also be able to reach n8n's webhook URLs, which on n8n Cloud it can. For a
+production host, [`deploy/gateway`](../../deploy/gateway) has a container with automatic HTTPS
+and how to back it up, rotate keys and upgrade. More on the gateway itself — keys,
+subscriptions, what it keeps on disk — is in the [CLI's README](../cli#behind-an-http-api-agx-gateway).
 
 ## Install
 

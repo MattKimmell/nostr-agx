@@ -391,6 +391,10 @@ agx gateway key list
 agx gateway key revoke <id>         # a running gateway refuses it at once
 ```
 
+To run it for real, in a container behind automatic HTTPS, see
+[`deploy/gateway`](../../deploy/gateway): a Dockerfile, a Compose file with Caddy, and how to back
+it up, rotate keys and upgrade.
+
 Every route but `GET /v1/health` needs `Authorization: Bearer <key>`. `AGX_GATEWAY_KEY` is
 accepted as a key too, for a container whose secrets come from its environment; it must be at
 least 32 characters (`openssl rand -base64 32`). The gateway
@@ -399,6 +403,7 @@ proxy or tunnel, because the key and every task payload cross that connection.
 
 | Route | |
 | --- | --- |
+| `GET /v1/health` | no key: `200` while polls of the relays keep finishing, `503` before the first and once none has for a minute; `allRelaysAnswering` |
 | `GET /v1/identity` | the agent's `npub`, `pubkey`, relays, organization and NIP-05 address |
 | `POST /v1/tasks` | `{ peer, capability, payload?, timeoutSec?, checkCard? }`: request a task and wait for its result, up to an hour (default 30 s) |
 | `POST /v1/messages` | `{ peer, text, subject?, contextId?, autoDepth?, maxAutoDepth?, maxPerConversation?, maxPerHour? }`: send a message; an automated reply (`autoDepth` above 0) is refused past 8 deep, 20 per conversation or 60 per agent per hour, unless those limits are given |

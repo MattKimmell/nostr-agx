@@ -13,6 +13,7 @@ import { resolveProfileName } from "../config.js";
 import { loadIdentity } from "../identity.js";
 import { profileDir, seenPath } from "../paths.js";
 import { MESSAGES_FILE } from "../store/message-store.js";
+import { AGX_CLI_VERSION } from "../version.js";
 import { type RunningGateway, startGateway } from "./gateway.js";
 import { createGatewayKey } from "./keys.js";
 
@@ -181,7 +182,16 @@ afterAll(async () => {
 
 describe("agx gateway: authentication", () => {
 	it("answers health without a key, and nothing else", async () => {
-		expect((await api("/v1/health", { key: null })).status).toBe(200);
+		// Healthy once a poll has finished.
+		let health: Response | undefined;
+		for (let i = 0; i < 50 && health?.status !== 200; i++) {
+			health = await api("/v1/health", { key: null });
+			if (health.status !== 200) {
+				await new Promise((r) => setTimeout(r, 100));
+			}
+		}
+		expect(health?.status).toBe(200);
+		expect(await json(health as Response)).toMatchObject({ ok: true, allRelaysAnswering: true, version: AGX_CLI_VERSION });
 		const missing = await api("/v1/identity", { key: null });
 		expect(missing.status).toBe(401);
 		expect(missing.headers.get("www-authenticate")).toContain("Bearer");

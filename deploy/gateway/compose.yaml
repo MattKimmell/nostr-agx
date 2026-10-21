@@ -1,0 +1,42 @@
+# agx gateway behind Caddy, which obtains and renews a TLS certificate for
+# AGX_DOMAIN. Set AGX_DOMAIN and AGX_RELAY in a .env file next to this one and
+# point the domain's DNS at this host; README.md here has the first-run steps.
+
+services:
+  gateway:
+    build: .
+    image: agx-gateway:0.5.0
+    restart: unless-stopped
+    init: true
+    # The gateway waits up to 8 s for running tasks when it stops.
+    stop_grace_period: 15s
+    environment:
+      # The relays the agent reads its inbox from and publishes to.
+      AGX_RELAY: ${AGX_RELAY:?set AGX_RELAY to the relays, separated by commas}
+    volumes:
+      - agx-data:/data
+    # Reachable only through Caddy.
+    expose:
+      - "8787"
+
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      AGX_DOMAIN: ${AGX_DOMAIN:?set AGX_DOMAIN to the gateway's domain name}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    depends_on:
+      gateway:
+        condition: service_healthy
+
+volumes:
+  # The agent's secret key lives here: back it up, and keep it private.
+  agx-data:
+  caddy-data:
+  caddy-config:

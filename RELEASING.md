@@ -13,7 +13,9 @@ built from.
    `packages/n8n-nodes-agx-gateway` `package.json`, plus
    `AGX_CORE_VERSION` (`packages/core/src/index.ts`), `AGX_NOSTR_VERSION`
    (`packages/nostr/src/index.ts`) and `AGX_CLI_VERSION` (`packages/cli/src/lib/version.ts`; `version.test.ts` fails if it
-   drifts from `packages/cli/package.json`).
+   drifts from `packages/cli/package.json`), and the gateway container's `AGX_PACKAGE` in
+   `deploy/gateway/Dockerfile` and image tag in `deploy/gateway/compose.yaml` (the same test checks
+   both).
 2. Build, test and check what each tarball ships:
 
    ```sh
