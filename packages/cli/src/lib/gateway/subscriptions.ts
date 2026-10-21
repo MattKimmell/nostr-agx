@@ -61,20 +61,85 @@ export type Subscription = z.infer<typeof storedSchema>;
 /** A subscription as the API shows it after creation: without its secret. */
 export type SubscriptionView = Omit<Subscription, "secret">;
 
+/** An IPv4 address a webhook may not point at: unspecified (0.0.0.0/8),
+ * link-local (169.254.0.0/16, where cloud metadata services answer), or
+ * multicast and reserved (224.0.0.0 and up). */
+function isForbiddenIPv4(address: string): boolean {
+	const [a, b] = address.split(".").map(Number);
+	return a === 0 || (a === 169 && b === 254) || a >= 224;
+}
+
+/** The eight 16-bit groups of an IPv6 address, or null if it is not one. */
+function ipv6Groups(address: string): number[] | null {
+	let text = address;
+	// A dotted IPv4 tail (`::ffff:1.2.3.4`) is the last two groups.
+	const dotted = /^(.*:)(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(text);
+	if (dotted) {
+		const octets = dotted.slice(2).map(Number);
+		if (octets.some((octet) => octet > 255)) {
+			return null;
+		}
+		text = `${dotted[1]}${((octets[0] << 8) | octets[1]).toString(16)}:${((octets[2] << 8) | octets[3]).toString(16)}`;
+	}
+	const halves = text.split("::");
+	if (halves.length > 2) {
+		return null;
+	}
+	const head = halves[0] ? halves[0].split(":") : [];
+	const tail = halves.length === 2 && halves[1] ? halves[1].split(":") : [];
+	const gap = 8 - head.length - tail.length;
+	if (halves.length === 1 ? gap !== 0 : gap < 1) {
+		return null;
+	}
+	const groups = [...head, ...Array<string>(halves.length === 2 ? gap : 0).fill("0"), ...tail];
+	if (!groups.every((group) => /^[0-9a-f]{1,4}$/.test(group))) {
+		return null;
+	}
+	return groups.map((group) => Number.parseInt(group, 16));
+}
+
+/** The IPv4 address an IPv6 one carries and reaches: IPv4-mapped
+ * (`::ffff:a.b.c.d`), IPv4-translated (`::ffff:0:a.b.c.d`), IPv4-compatible
+ * (`::a.b.c.d`) or NAT64 (`64:ff9b::a.b.c.d`). */
+function embeddedIPv4(groups: number[]): string | null {
+	const zero = (from: number, to: number) => groups.slice(from, to).every((group) => group === 0);
+	const mapped = zero(0, 5) && groups[5] === 0xffff;
+	const translated = zero(0, 4) && groups[4] === 0xffff && groups[5] === 0;
+	const nat64 = groups[0] === 0x64 && groups[1] === 0xff9b && zero(2, 6);
+	// `::` and `::1` are not IPv4 addresses, whatever their shape says.
+	const compatible = zero(0, 6) && (groups[6] !== 0 || groups[7] > 1);
+	if (!mapped && !translated && !nat64 && !compatible) {
+		return null;
+	}
+	return [groups[6] >> 8, groups[6] & 0xff, groups[7] >> 8, groups[7] & 0xff].join(".");
+}
+
 /**
  * Addresses a webhook may not point at: link-local, where cloud metadata
- * services answer (169.254.169.254), unspecified, and multicast. Loopback and
- * private networks stay allowed, since n8n often runs on the same machine or
- * network as the gateway.
+ * services answer (169.254.169.254, fd00:ec2::254), unspecified, and multicast,
+ * however an IPv6 address wraps them. Loopback and private networks stay
+ * allowed, since n8n often runs on the same machine or network as the gateway.
+ * Anything that is not an address at all is refused.
  */
-function isForbiddenAddress(address: string): boolean {
-	const lower = address.toLowerCase();
-	const v4 = lower.startsWith("::ffff:") ? lower.slice(7) : lower;
-	if (isIP(v4) === 4) {
-		const [a, b] = v4.split(".").map(Number);
-		return a === 0 || (a === 169 && b === 254) || a >= 224;
+export function isForbiddenAddress(address: string): boolean {
+	const plain = address.replace(/%.*$/, "").toLowerCase();
+	if (isIP(plain) === 4) {
+		return isForbiddenIPv4(plain);
 	}
-	return lower === "::" || /^fe[89ab]/.test(lower) || lower.startsWith("ff") || lower === "fd00:ec2::254";
+	const groups = ipv6Groups(plain);
+	if (!groups) {
+		return true;
+	}
+	const v4 = embeddedIPv4(groups);
+	if (v4) {
+		return isForbiddenIPv4(v4);
+	}
+	return (
+		groups.every((group) => group === 0) ||
+		(groups[0] & 0xffc0) === 0xfe80 ||
+		groups[0] >> 8 === 0xff ||
+		(groups[0] === 0xfd00 && groups[1] === 0xec2 && groups.slice(2, 7).every((group) => group === 0) && groups[7] === 0x254)
+	);
 }
 
 /**

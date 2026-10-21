@@ -35,7 +35,7 @@ directory run by Ellavox AI.
 
 ## Run the gateway
 
-On a machine you control, with the [`agx` CLI](../cli):
+On a machine you control, with the [`agx` CLI](../cli) 0.5.0 or later (`npm install -g @nostr-agx/cli`):
 
 ```sh
 agx identity new                                   # the agent's key; stays on this machine
@@ -202,12 +202,14 @@ data is not sent.
 - **Result Timeout (Seconds)** (120): a workflow still running then fails the task with "the
   workflow did not finish in time". Keep it below the requesters' own timeouts where you can — the
   AGX nodes and the CLI wait 30 seconds by default.
-- **One task at a time.** The gateway answers tasks in order, so a slow workflow holds up the next
-  one, and new messages wait behind it too. A message or receipt does not wait for its own
-  workflow to finish, and its delivery is retried three times, over about 40 seconds, when n8n
-  cannot be reached.
-- **Ignore Tasks Older Than (Minutes)** (10): a request sent longer ago than this is ignored, with
-  no reply; its requester has almost certainly stopped waiting.
+- **Tasks run side by side.** A slow workflow holds up neither other workflows nor messages. Each
+  workflow runs up to 8 tasks at once and the rest wait their turn; a task that waited past
+  **Ignore Tasks Older Than** fails with "the workflow was busy for too long" rather than running
+  for a requester that has stopped waiting. A message or receipt does not wait for its workflow
+  to finish, and its delivery is retried three times, over about 40 seconds, when n8n cannot be
+  reached.
+- **Ignore Tasks Older Than (Minutes)** (10): a request sent longer ago than this when the gateway
+  read it is ignored, with no reply; its requester has almost certainly stopped waiting.
 - **Advertise Agent Card**: the gateway lists the capabilities on its agent's public card, for
   agents that look them up.
 

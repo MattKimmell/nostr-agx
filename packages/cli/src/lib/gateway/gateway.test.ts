@@ -1,6 +1,6 @@
 import { createHmac } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
-import { createServer, type IncomingMessage, type Server } from "node:http";
+import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { join } from "node:path";
 import type { AddressInfo } from "node:net";
 import { AgxClient, DEFAULT_CONTENT_TYPE } from "@nostr-agx/core";
@@ -56,6 +56,25 @@ async function webhook(
 	return { url, received };
 }
 const servers: Server[] = [];
+
+/** A webhook that holds every request until the test answers it. */
+async function heldWebhook() {
+	const held: ServerResponse[] = [];
+	const server: Server = createServer((req, res) => {
+		req.resume();
+		req.on("end", () => held.push(res));
+	});
+	await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+	servers.push(server);
+	return {
+		url: `http://127.0.0.1:${(server.address() as AddressInfo).port}/webhook`,
+		held,
+		answer(index: number, body: unknown) {
+			held[index].writeHead(200, { "content-type": "application/json" });
+			held[index].end(JSON.stringify(body));
+		},
+	};
+}
 
 /** An AGX agent on the test relay. */
 async function peer(options: ConstructorParameters<typeof AgxClient>[0] extends infer O ? Partial<O> : never = {}) {
@@ -128,6 +147,11 @@ async function subscribe(body: Record<string, unknown>) {
 	return (await res.json()) as { id: string; secret: string };
 }
 
+/** One task per webhook at a time, so a test can make one wait its turn. */
+function gatewayOptions() {
+	return { profile, port: 0, pollIntervalMs: 200, deliveryRetryDelaysMs: [100], maxTasksPerWebhook: 1 };
+}
+
 beforeAll(async () => {
 	box = sandbox();
 	relay = await startRelay({ port: 0 });
@@ -135,7 +159,7 @@ beforeAll(async () => {
 	expect((await agx("config", "set", "relays", `ws://127.0.0.1:${relay.port}`)).code).toBe(0);
 	profile = resolveProfileName();
 	key = createGatewayKey(profile, "test").key;
-	gateway = await startGateway({ profile, port: 0, pollIntervalMs: 200, deliveryRetryDelaysMs: [100] });
+	gateway = await startGateway(gatewayOptions());
 }, 30_000);
 
 afterEach(async () => {
@@ -392,6 +416,44 @@ describe("agx gateway: inbound", () => {
 		await expect(pumping(result, requester.client)).resolves.toEqual({ from: "older" });
 	}, 30_000);
 
+	it("keeps answering other webhooks' tasks while one workflow is slow", async () => {
+		const requester = await peer();
+		const slow = await heldWebhook();
+		await subscribe({ url: slow.url, events: ["task"], capabilities: ["invoice.slow"], allowedPeers: [requester.npub] });
+		const fast = await webhook(() => ({ status: 200, body: { fast: true } }));
+		await subscribe({ url: fast.url, events: ["task"], capabilities: ["invoice.fast"], allowedPeers: [requester.npub] });
+
+		const slowResult = requester.client.request(gateway.npub, "invoice.slow", {}, { timeoutMs: 25_000 });
+		await waitFor(() => slow.held.length === 1);
+		const fastResult = requester.client.request(gateway.npub, "invoice.fast", {}, { timeoutMs: 10_000 });
+		await expect(pumping(fastResult, requester.client)).resolves.toEqual({ fast: true });
+
+		slow.answer(0, { slow: true });
+		await expect(pumping(slowResult, requester.client)).resolves.toEqual({ slow: true });
+	}, 30_000);
+
+	it("tells the requester when a task waited for its webhook past the task's age limit", async () => {
+		const requester = await peer();
+		const busy = await heldWebhook();
+		await subscribe({
+			url: busy.url,
+			events: ["task"],
+			capabilities: ["invoice.queue"],
+			allowedPeers: [requester.npub],
+			maxTaskAgeSec: 2,
+		});
+		const first = requester.client.request(gateway.npub, "invoice.queue", { n: 1 }, { timeoutMs: 25_000 });
+		await waitFor(() => busy.held.length === 1);
+		// One task per webhook in these tests: the second waits its turn.
+		const second = requester.client.request(gateway.npub, "invoice.queue", { n: 2 }, { timeoutMs: 25_000 });
+		second.catch(() => undefined);
+		await new Promise((r) => setTimeout(r, 3500));
+		busy.answer(0, { n: 1 });
+		await expect(pumping(first, requester.client)).resolves.toEqual({ n: 1 });
+		await expect(pumping(second, requester.client)).rejects.toThrow("the workflow was busy for too long");
+		expect(busy.held).toHaveLength(1);
+	}, 30_000);
+
 	it("delivers an allowed agent's message in the background, with the depth a reply declares", async () => {
 		const sender = await peer();
 		const hook = await webhook();
@@ -427,7 +489,7 @@ describe("agx gateway: inbound", () => {
 		await expect(pumping(first, requester.client)).resolves.toEqual({ run: 1 });
 
 		await gateway.close();
-		gateway = await startGateway({ profile, port: 0, pollIntervalMs: 200, deliveryRetryDelaysMs: [100] });
+		gateway = await startGateway(gatewayOptions());
 		// The same inbox, read again from the saved cursor: the first task is
 		// in the poll window but already handled.
 		await new Promise((r) => setTimeout(r, 1500));

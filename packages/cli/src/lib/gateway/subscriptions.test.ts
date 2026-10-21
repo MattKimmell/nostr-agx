@@ -2,7 +2,14 @@ import { generateKeypair, toNpub } from "@nostr-agx/nostr";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { sandbox } from "../../test/helpers.js";
 import { createGatewayKey, revokeGatewayKey, verifyGatewayKey } from "./keys.js";
-import { parseSubscriptionInput, START_GRACE_SEC, SubscriptionError, SubscriptionStore } from "./subscriptions.js";
+import {
+	assertWebhookHost,
+	isForbiddenAddress,
+	parseSubscriptionInput,
+	START_GRACE_SEC,
+	SubscriptionError,
+	SubscriptionStore,
+} from "./subscriptions.js";
 
 let box: ReturnType<typeof sandbox>;
 beforeEach(() => {
@@ -92,5 +99,51 @@ describe("gateway API keys", () => {
 		expect(verifyGatewayKey("default", "env-provided-key-0123456789abcde")).toBeNull();
 		process.env.AGX_GATEWAY_KEY = "short-key";
 		expect(verifyGatewayKey("default", "short-key")).toBeNull();
+	});
+});
+
+describe("webhook hosts", () => {
+	it("refuses link-local, metadata, unspecified and multicast addresses, however they are written", async () => {
+		for (const url of [
+			"http://169.254.169.254/latest/meta-data/",
+			"http://2852039166/",
+			"http://[::ffff:169.254.169.254]/",
+			"http://[::ffff:a9fe:a9fe]/",
+			"http://[::ffff:0.0.0.0]/",
+			"http://[::ffff:0:169.254.169.254]/",
+			"http://[::169.254.169.254]/",
+			"http://[64:ff9b::169.254.169.254]/",
+			"http://0.0.0.0:5678/",
+			"http://[::]/",
+			"http://[fe80::1]/",
+			"http://[fd00:ec2::254]/",
+			"http://224.0.0.1/",
+			"http://[ff02::1]/",
+			"http://[::ffff:224.0.0.1]/",
+		]) {
+			await expect(assertWebhookHost(url), url).rejects.toThrow("may not use");
+		}
+	});
+
+	it("allows this machine, private networks and public addresses", async () => {
+		for (const url of [
+			"http://127.0.0.1:5678/webhook/x",
+			"http://[::1]:5678/",
+			"http://[::ffff:127.0.0.1]/",
+			"http://10.0.0.5/",
+			"http://192.168.1.10/",
+			"http://[fd12:3456::1]/",
+			"http://[64:ff9b::1.2.3.4]/",
+			"https://93.184.215.14/",
+		]) {
+			await expect(assertWebhookHost(url), url).resolves.toBeUndefined();
+		}
+	});
+
+	it("reads addresses as DNS returns them", () => {
+		expect(isForbiddenAddress("FE80::1%eth0")).toBe(true);
+		expect(isForbiddenAddress("::ffff:169.254.169.254")).toBe(true);
+		expect(isForbiddenAddress("2606:4700::6810:84e5")).toBe(false);
+		expect(isForbiddenAddress("not-an-address")).toBe(true);
 	});
 });

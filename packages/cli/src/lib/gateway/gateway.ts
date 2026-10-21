@@ -30,6 +30,7 @@ import { ApiError, readJson, sendError, sendJson } from "./http.js";
 import { verifyGatewayKey } from "./keys.js";
 import { type OperationDeps, readCard, requestTask, sendMessage } from "./operations.js";
 import { Requester } from "./requester.js";
+import { KeyedSlots } from "./slots.js";
 import {
 	assertWebhookHost,
 	parseSubscriptionInput,
@@ -66,6 +67,8 @@ export interface GatewayOptions {
 	log?: (line: string) => void;
 	/** For tests: waits before each retry of a background delivery. */
 	deliveryRetryDelaysMs?: number[];
+	/** Tasks one webhook runs at once; the rest wait their turn. Default 8. */
+	maxTasksPerWebhook?: number;
 }
 
 export interface RunningGateway {
@@ -83,6 +86,9 @@ export const DEFAULT_GATEWAY_PORT = 8787;
 const CARD_SETTLE_MS = 1_100;
 /** How long before a card no relay accepted is published again. */
 const CARD_RETRY_MS = 30_000;
+/** Tasks the gateway takes on at once; past it, reading the inbox waits. */
+const MAX_TASKS_IN_FLIGHT = 64;
+const DEFAULT_TASKS_PER_WEBHOOK = 8;
 
 function nowSec(): number {
 	return Math.floor(Date.now() / 1000);
@@ -149,8 +155,15 @@ export async function startGateway(options: GatewayOptions): Promise<RunningGate
 			},
 		};
 
+		// Tasks run side by side, each webhook in its own slots: a slow workflow
+		// holds up neither the inbox nor the other webhooks.
+		const webhookSlots = new KeyedSlots(options.maxTasksPerWebhook ?? DEFAULT_TASKS_PER_WEBHOOK);
+		// When the current poll started: a task's age is measured from when it
+		// was fetched, not from when its turn came.
+		let polledAt = nowSec();
+
 		const runTask = async (task: Task): Promise<unknown> => {
-			const targets = subscriptions.forTask(task.capability, task.from, task.sentAt ?? nowSec());
+			const targets = subscriptions.forTask(task.capability, task.from, task.sentAt ?? polledAt, polledAt);
 			if (targets.length === 0) {
 				// The subscription went away between authorization and now.
 				throw new AgxTaskDeclined("no webhook serves it any more");
@@ -166,12 +179,28 @@ export async function startGateway(options: GatewayOptions): Promise<RunningGate
 			seen.flush();
 			log(`TASK  ${task.capability} from ${toNpub(task.from)}`);
 			for (const subscription of targets) {
-				const outcome = await deliver(
-					subscription,
-					taskEvent(task),
-					task.eventId ?? task.taskId,
-					subscription.resultTimeoutSec * 1000,
-				);
+				const release = await webhookSlots.acquire(subscription.id);
+				let outcome: Awaited<ReturnType<typeof deliver>>;
+				try {
+					if (closed) {
+						throw new AgxTaskDeclined("the gateway is stopping");
+					}
+					// It waited for the webhook to be free: past the age the webhook
+					// accepts, the requester has almost certainly stopped waiting.
+					const sentAt = task.sentAt ?? polledAt;
+					if (subscription.maxTaskAgeSec > 0 && nowSec() - sentAt > subscription.maxTaskAgeSec) {
+						log(`LATE  ${task.capability} from ${toNpub(task.from)}: ${subscription.id} was busy past the task's age limit`);
+						throw new AgxPublicError("the workflow was busy for too long");
+					}
+					outcome = await deliver(
+						subscription,
+						taskEvent(task),
+						task.eventId ?? task.taskId,
+						subscription.resultTimeoutSec * 1000,
+					);
+				} finally {
+					release();
+				}
 				if (outcome.kind === "timeout") {
 					throw new AgxPublicError("the workflow did not finish in time");
 				}
@@ -208,6 +237,7 @@ export async function startGateway(options: GatewayOptions): Promise<RunningGate
 			// First run: from now. The poll still reaches back the full lookback,
 			// and what is too old for a webhook is filtered below.
 			startCursor: state.cursor > 0 ? state.cursor : nowSec(),
+			maxConcurrentTasks: MAX_TASKS_IN_FLIGHT,
 			// A task request every webhook serving it considers too old: dropped
 			// before authorization, with no receipt and no reply.
 			ignore: (event) => {
@@ -219,7 +249,7 @@ export async function startGateway(options: GatewayOptions): Promise<RunningGate
 					return false;
 				}
 				const sentAt = event.sentAt ?? event.createdAt;
-				if (subscriptions.forTask(env.capability, event.from, sentAt).length > 0) {
+				if (subscriptions.forTask(env.capability, event.from, sentAt, polledAt).length > 0) {
 					return false;
 				}
 				log(`OLD   ${env.capability} from ${toNpub(event.from)}: too old for every webhook serving it, ignored`);
@@ -317,6 +347,7 @@ export async function startGateway(options: GatewayOptions): Promise<RunningGate
 				try {
 					refreshAllowed();
 					store.absorbSpool();
+					polledAt = nowSec();
 					const result = await client.pump();
 					if (result.complete) {
 						cursor = result.cursor;
@@ -458,7 +489,7 @@ export async function startGateway(options: GatewayOptions): Promise<RunningGate
 			});
 			requester.stop();
 			await Promise.race([
-				Promise.all([pumpLoop, publishing]),
+				Promise.all([pumpLoop, publishing, client.tasksSettled()]),
 				new Promise((resolve) => setTimeout(resolve, 10_000)),
 			]);
 			await client.stop().catch(() => undefined);

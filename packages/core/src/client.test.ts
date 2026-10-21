@@ -1096,3 +1096,89 @@ describe("AgxClient gives a host what it needs to keep its own replay records", 
 		expect(onMessage).toHaveBeenCalledTimes(1);
 	});
 });
+
+describe("AgxClient runs tasks side by side when asked to", () => {
+	function gate() {
+		let open: () => void = () => undefined;
+		const opened = new Promise<void>((resolve) => {
+			open = resolve;
+		});
+		return { opened, open };
+	}
+
+	it("by default, waits in pump() for each handler", async () => {
+		const alice = new AgxClient({ transport: bus.transport(ALICE) });
+		const bob = new AgxClient({ transport: bus.transport(BOB), authorize: "accept-all" });
+		const slow = gate();
+		bob.handle("slow", () => slow.opened.then(() => "slow done"));
+		void alice.request(BOB, "slow", {}).catch(() => undefined);
+		let pumped = false;
+		const pumping = bob.pump().then(() => {
+			pumped = true;
+		});
+		await new Promise((r) => setTimeout(r, 20));
+		expect(pumped).toBe(false);
+		slow.open();
+		await pumping;
+		expect(pumped).toBe(true);
+		await alice.stop();
+	});
+
+	it("does not let a slow handler hold up another task or a message", async () => {
+		const alice = new AgxClient({ transport: bus.transport(ALICE) });
+		const messages: string[] = [];
+		const bob = new AgxClient({
+			transport: bus.transport(BOB),
+			authorize: "accept-all",
+			maxConcurrentTasks: 4,
+			onMessage: (msg) => {
+				messages.push(msg.text);
+			},
+		});
+		const slow = gate();
+		bob.handle("slow", () => slow.opened.then(() => "slow done"));
+		bob.handle("fast", () => "fast done");
+		const slowResult = alice.request(BOB, "slow", {});
+		const fastResult = alice.request(BOB, "fast", {});
+		await bus.transport(ALICE).publishMessage(BOB, { text: "hello" });
+
+		// The pump returns with the slow task still running.
+		await bob.pump();
+		expect(messages).toEqual(["hello"]);
+		// The fast task's result is sent from its own slot, just after.
+		await new Promise((r) => setTimeout(r, 10));
+		await alice.pump();
+		await expect(fastResult).resolves.toBe("fast done");
+
+		slow.open();
+		await bob.tasksSettled();
+		await alice.pump();
+		await expect(slowResult).resolves.toBe("slow done");
+	});
+
+	it("runs no more than maxConcurrentTasks at once, and waits for a free slot", async () => {
+		const alice = new AgxClient({ transport: bus.transport(ALICE) });
+		const bob = new AgxClient({ transport: bus.transport(BOB), authorize: "accept-all", maxConcurrentTasks: 2 });
+		const slow = gate();
+		let running = 0;
+		let most = 0;
+		bob.handle("slow", async () => {
+			running += 1;
+			most = Math.max(most, running);
+			await slow.opened;
+			running -= 1;
+			return "ok";
+		});
+		const results = [1, 2, 3].map(() => alice.request(BOB, "slow", {}));
+		const pumping = bob.pump();
+		await new Promise((r) => setTimeout(r, 20));
+		// Two running; the pump waits for a slot for the third.
+		expect(running).toBe(2);
+		slow.open();
+		await pumping;
+		await bob.tasksSettled();
+		expect(most).toBe(2);
+		await alice.pump();
+		await expect(Promise.all(results)).resolves.toEqual(["ok", "ok", "ok"]);
+	});
+});

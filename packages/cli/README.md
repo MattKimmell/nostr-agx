@@ -382,7 +382,7 @@ it can never reach a real relay or API. It is not part of `test:unit`.
 and receive webhooks but cannot speak Nostr: n8n Cloud, through
 [`@nostr-agx/n8n-nodes-agx-gateway`](../n8n-nodes-agx-gateway), or Make, Zapier, or a script. The
 gateway holds the secret key and the profile lock, as `serve` does, and keeps the same cursor,
-replay store and message store, so `agx threads` shows what went through it.
+replay store and message store, so `agx threads` shows what went through it. It needs agx 0.5.0 or later.
 
 ```sh
 agx gateway key new --label n8n     # an API key; shown once, kept only as a SHA-256 hash
@@ -426,10 +426,12 @@ multicast or unspecified address, such as a cloud metadata service.
   webhook nobody could connect to, or that answers `404` or `410`, is skipped for the next older
   one (a test webhook n8n has dropped, for instance). Any other answer, or a connection that broke
   off, reaches the requester as `handler failed`, and a webhook still busy after
-  `resultTimeoutSec` as "the workflow did not finish in time". Tasks are handled one at a time,
-  and at most once: a task is recorded as handled before its webhook gets it, so if the gateway
-  stops or crashes while the workflow runs, the requester gets no result — its timeout covers
-  that — and the workflow is not run again.
+  `resultTimeoutSec` as "the workflow did not finish in time". Tasks run side by side, up to 8
+  at once per webhook, so a slow workflow holds up neither the other webhooks nor messages; a task
+  that waited for its webhook past `maxTaskAgeSec` fails with "the workflow was busy for too
+  long". Each task runs at most once: it is recorded as handled before its webhook gets it, so if
+  the gateway stops or crashes while the workflow runs, the requester gets no result — its
+  timeout covers that — and the workflow is not run again.
 - **A message or receipt** is POSTed to every subscription that wants it, in the background, and
   retried three times over about 40 seconds when the webhook is unreachable or answers `429`,
   `502`, `503` or `504`.
