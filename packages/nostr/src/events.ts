@@ -75,14 +75,20 @@ const CREATED_AT_MAX = 9_999_999_999;
  * content-type tag) so a "fits" answer here can never become an oversize throw
  * at sign time. Byte cap only — the char cap (`MAX_BODY`) is the core's
  * concern. Uses `TextEncoder` (not `Buffer`) so it works in edge/browser
- * builds too. */
+ * builds too.
+ *
+ * THROWS what `buildExchangePayload` throws, because it measures through it:
+ * `AgxBodyTooLongError` for `text` over `MAX_BODY`, and, since 0.5.0,
+ * `AgxEvidenceInvalidError` for `evidence` outside the schema. A caller that
+ * wants a number rather than an exception checks both first, as
+ * `NostrTransport.publishMessage` does (`text.length` against `MAX_BODY`,
+ * then `exchangeEvidenceProblem`). */
 export function exchangeMessagePlaintextBytes(
 	text: string,
 	opts?: {
 		contentType?: string;
 		subject?: string | null;
-		/** Counted as it will be signed: the same builder runs, so this throws
-		 * `AgxEvidenceInvalidError` for evidence `signMessageEvent` would refuse. */
+		/** Counted as it will be signed: the same builder runs. */
 		evidence?: ExchangeEvidence;
 	},
 ): number {
