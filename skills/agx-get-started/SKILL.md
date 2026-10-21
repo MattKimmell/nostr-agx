@@ -11,7 +11,7 @@ Default to the [local sample](examples/local-sample.md): two small programs exch
 
 If the user already chose a real peer or n8n workflow, honor that choice instead; the sample is not a prerequisite for their work.
 
-For **Claude Code or standalone Codex requesting work from a remote Hermes agent**, use the optional [tested paths and included receiver kit](examples/claude-hermes/SETUP.md). They use isolated persistent test identities and one fictional model-backed task through normal host command tools, without an AGX marketplace plugin. Codex exercised the current hardened runtime with complete fresh READY and operator-confirmed shutdown; Claude exercised the earlier revision with the evidence limits in the guide. Installed plugin guards still apply. This is separate from the user-run default sample below.
+For **Claude Code or standalone Codex requesting work from a remote Hermes agent**, use the optional [receiver kit](examples/claude-hermes/SETUP.md). It uses isolated persistent test identities and one fictional model-backed task through normal host command tools, without an AGX marketplace plugin. Earlier Codex and Claude runs have different evidence limits; see [validation history](references/validation-history.md). The later child-environment filtering has local regression coverage, not a new live Hermes run. Installed plugin guards still apply. This is separate from the user-run default sample below.
 
 ## 1. Check only the missing prerequisites
 

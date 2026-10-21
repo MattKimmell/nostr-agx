@@ -8,7 +8,7 @@ Do not run the wrapper to circumvent an installed guard: it starts a task receiv
 
 ## Tested optional flow: Claude Code → remote Hermes
 
-When the user chooses Hermes, read the [receiver kit and walkthrough](../examples/claude-hermes/SETUP.md). The included runtime pins CLI 0.3.0 locally and was exercised by Claude Code 2.1.285 against Hermes Agent v0.21.5. The requester used Claude's normal command tool with explicit user authorization; an AGX marketplace plugin was not installed in that session. A plugin/global CLI is therefore not a prerequisite for this included kit.
+When the user chooses Hermes, read the [receiver kit and walkthrough](../examples/claude-hermes/SETUP.md). It pins CLI 0.3.0 locally and needs no global CLI or marketplace plugin. An earlier Claude run succeeded but lacked complete fresh private-context verification; a new run must satisfy every check below. See [validation history](validation-history.md) for versions and evidence limits.
 
 Honor the chosen send controls. In a session without an installed AGX draft-only guard, the user may authorize one exact synthetic task, and Claude can preview it and execute the send through its normal Bash permission flow. With a restrictive installed guard, use its supported send mode or stop and explain; this wrapper does not grant an exception. In particular, do not treat host command approval as changing an AGX plugin's draft-only mode.
 
@@ -20,8 +20,6 @@ Use `node peer.mjs prepare VERIFIED_RECEIVER_NPUB` to make a preview without sen
 
 Do not hand an already authorized assisted send back as another manual terminal command unless a real host/guard restriction requires that. Inspect the actual verified result and obtain the receiver's current-run DISCONNECTED status and process-group check. A successful return alone does not prove shutdown. The example removes only the known blank-toolset diagnostic while preserving the zero-tool selection; group supervision handles remaining children and task/deadline shutdown.
 
-The historical real run proved clean output, a direct Claude send and automatic group cleanup. Its fresh READY did **not** reconfirm private-context isolation; the earlier check must not be presented as a fresh verification. The explicit readiness requirement is the correction incorporated in this draft.
-
 ## Other real peers: optional marketplace integration
 
 This section preserves the plugin at `8e60ba5c58594e27252c84b031412132c085eeb5`. It covers Claude Code, not Claude.ai or Cowork. The source documents Claude Code 2.1.271+; integration on the installed host still needs a smoke test.
@@ -31,13 +29,13 @@ The plugin controls here apply when that plugin is installed. They do not make i
 ### Bootstrap only what is missing
 
 1. If Node/npm are missing, use the sample's runtime guidance first.
-2. If global `agx` is missing or lacks task support, the user installs the verified published baseline in their terminal:
+2. If global `agx` is missing or lacks task support, the user installs the published release in their terminal:
 
    ```sh
-   npm install -g @nostr-agx/cli@0.3.0
+   npm install -g @nostr-agx/cli@0.4.0
    ```
 
-   Keep compatible existing installations. CLI 0.3.2 is unnecessary for requests and was absent from npm when checked for this revision.
+   Keep compatible existing installations. This optional integration uses published 0.4.0 for new installations; the self-contained examples deliberately retain their tested 0.3.0 lockfiles.
 3. If the plugin is missing, the user runs:
 
    ```sh
@@ -67,7 +65,7 @@ Options precede `--`, then peer/capability. Single-quote literal values and esca
 
 ### Messaging is optional
 
-Use existing messaging/allow/watch skills only if requested. CLI 0.3.0 supports the guarded watch:
+Use existing messaging/allow/watch skills only if requested. Both the locked 0.3.0 baseline and published 0.4.0 support the guarded watch:
 
 ```sh
 agx serve --no-reply --no-tasks --allowed-only --full-ids --no-color 2>&1
@@ -75,4 +73,4 @@ agx serve --no-reply --no-tasks --allowed-only --full-ids --no-color 2>&1
 
 Preserve selected profile, flags, startup checks and host lifecycle. With Monitor the watch lasts up to 30 minutes; without it output is read on demand. It serves no task. Do not compete with another reader or restart a watch without the user's request.
 
-On 0.3.0, held text is not retained and a watch reads trust at startup: trust changes need a restart and the sender may need to resend. Source versions 0.3.1+ add retained text/live reloads; use only features the installed CLI supports. Do not require an unavailable upgrade for the first task.
+On 0.4.0, held text is retained and the watch reloads trust changes. The user can release held text with `agx held allow NPUB`; use the installed plugin's supported allow flow and actual selected sender. On older 0.3.0, held text is not retained and trust changes need a watch restart; the sender may need to resend. Check the installed version before choosing the flow. Messaging remains optional for a task request.

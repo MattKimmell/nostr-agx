@@ -32,7 +32,7 @@ test('only the known blank toolset diagnostic is removed', () => {
   assert.throws(() => parseHermesOutput('Warning: provider authentication failed\ntoken-1', 'token-1'), /Unexpected Hermes diagnostic/);
 });
 
-test('a gateway-launched handler pins the child workspace without changing its parent environment', async () => {
+test('a gateway-launched handler strips AGX settings and pins its workspace without changing the parent', async () => {
   const fixture = mkdtempSync(join(tmpdir(), 'agx-gateway-env-test-'));
   const stub = join(fixture, 'hermes.cjs');
   writeFileSync(stub, `const assert=require('node:assert/strict');
@@ -43,11 +43,15 @@ assert.equal(Object.hasOwn(process.env,'OLDPWD'),false);
 assert.equal(realpathSync(process.env.TERMINAL_CWD),realpathSync(process.cwd()));
 assert.equal(realpathSync(process.env.PWD),realpathSync(process.cwd()));
 assert.equal(process.env.HERMES_SESSION_SOURCE,'tool');
-assert.equal(process.env.AGX_TEST_AUTH_SENTINEL,'synthetic-auth-preserved');
+assert.deepEqual(Object.keys(process.env).filter(key=>key.startsWith('AGX_')),[]);
+assert.equal(process.env.OPENAI_API_KEY,'synthetic-auth-preserved');
+assert.equal(process.env.PATH,${JSON.stringify(process.env.PATH)});
 console.log('Synthetic summary. gateway-test');`);
   const inherited = {
     _HERMES_GATEWAY: '1', TERMINAL_CWD: fixture, MESSAGING_CWD: fixture,
-    PWD: fixture, OLDPWD: fixture, AGX_TEST_AUTH_SENTINEL: 'synthetic-auth-preserved',
+    PWD: fixture, OLDPWD: fixture, OPENAI_API_KEY: 'synthetic-auth-preserved',
+    AGX_HOME: join(fixture, 'receiver-keys'), AGX_PROFILE: 'receiver',
+    AGX_API_KEY: 'synthetic-agx-key', AGX_TEST_AUTH_SENTINEL: 'must-not-reach-child',
   };
   const previous = Object.fromEntries(Object.keys(inherited).map(key => [key, process.env[key]]));
   let cwd;

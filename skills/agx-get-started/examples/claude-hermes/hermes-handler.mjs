@@ -34,8 +34,10 @@ export async function summarizeWithHermes(payload, task, run = execute) {
   try {
     // A gateway can export its workspace into a child CLI. OS cwd alone is
     // insufficient: pin the runtime carrier too, and run this child as a CLI.
-    // Preserve provider authentication; do not mutate the parent gateway env.
-    const env = { ...process.env, TERMINAL_CWD: work, PWD: work, HERMES_SESSION_SOURCE: 'tool' };
+    // Preserve provider authentication, but do not pass the receiver's AGX key
+    // folder or configuration into the model child. Leave the parent unchanged.
+    const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith('AGX_')));
+    Object.assign(env, { TERMINAL_CWD: work, PWD: work, HERMES_SESSION_SOURCE: 'tool' });
     delete env._HERMES_GATEWAY;
     delete env.MESSAGING_CWD;
     delete env.OLDPWD;

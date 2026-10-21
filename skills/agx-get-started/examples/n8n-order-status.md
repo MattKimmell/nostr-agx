@@ -4,14 +4,14 @@ For a task exchange without n8n, use the [tested local sample](local-sample.md).
 
 ## Version and review status
 
-The [workflow JSON](n8n-order-status.json) is an inactive import draft based on [Sean's PR #7](https://github.com/ellavox-ai/nostr-agx/pull/7), head `762930710957b9138232cb7d2e6757e50c588350`. The PR's package version is 0.3.2; this is not evidence it has been published. An operator must first obtain that reviewed build, or a later compatible release, on self-hosted n8n. This bundle does not install, import, or activate it. Do not assume n8n Cloud support.
+The [workflow JSON](n8n-order-status.json) is an inactive import draft for published `@nostr-agx/n8n-nodes-agx@0.4.0`, which includes the trigger behavior from [Sean's PR #7](https://github.com/ellavox-ai/nostr-agx/pull/7). On self-hosted n8n, use **Settings → Community Nodes → Install** with package `@nostr-agx/n8n-nodes-agx` and select version **0.4.0** if the installed n8n exposes a version selector. For an exact command-line install, an operator can run `npm install @nostr-agx/n8n-nodes-agx@0.4.0` in their existing n8n user folder's `nodes` directory (normally `~/.n8n/nodes`), then restart that n8n instance. Do not run this in the AGX example folder. This bundle does not install, import, or activate the workflow. Do not assume n8n Cloud support.
 
-The custom node type and parameters were checked against the PR source. The lookup code was exercised locally with simulated n8n input. Import and task exchange in real n8n remain unverified for this draft. The PR reports real n8n 2.43.7 testing of its nodes; that is separate evidence, not a test of this workflow.
+The custom node type, credential name and parameters were checked against the published 0.4.0 package. The lookup code was exercised locally with simulated n8n input. Import and task exchange in real n8n remain unverified for this draft; see [validation history](../references/validation-history.md) for the distinction between upstream node tests and this workflow.
 
 ## Receiver configuration — operator steps
 
 1. In self-hosted n8n with the AGX nodes available, import `n8n-order-status.json`. It is inactive, has no credential bindings, and has an empty allowlist. It cannot receive tasks until configured.
-2. Create an **AGX Agent Identity** credential using a dedicated demo key. The operator follows the terminal-only provisioning block below; put the key only in n8n's credential manager, never this chat or the workflow JSON. Neither assistant adapter permits the assistant to export a key. Do not reuse the assistant's identity.
+2. Create an **AGX Agent Identity API** credential using a dedicated demo key. The operator follows the terminal-only provisioning block below; put the key only in n8n's credential manager, never this chat or the workflow JSON. Neither assistant adapter permits the assistant to export a key. Do not reuse the assistant's identity.
 3. Configure a reachable relay that the requester also reads. For a local relay, `127.0.0.1` means the machine/container running n8n, not necessarily the requester's machine; a Docker deployment needs a mutually reachable address. This guide does not provision a public relay.
 4. Select that credential on **AGX Order Status**. Use the public `npub` printed during provisioning below; no additional identity-check workflow is needed. Share only that public address with the requester.
 5. Put the requester's actual public address into **Allowed Agents**. Leave **Accept All Agents** off. The only served capability is `demo.order-status`.
@@ -22,7 +22,7 @@ No AGX Send node is required after the lookup: the trigger returns the last node
 
 ### Operator-only credential provisioning
 
-With a task-capable global CLI installed (published 0.3.0 was tested for the default local sample), run the following in your own terminal. This creates an isolated key directory and prints a public address. Keep the directory path until the optional demo is finished.
+With a task-capable global CLI installed (use published `@nostr-agx/cli@0.4.0` for a new installation), run the following in your own terminal. This creates an isolated key directory and prints a public address. Keep the directory path until the optional demo is finished. The separate local sample still uses its own locked 0.3.0 dependency and does not need this global CLI.
 
 ```sh
 DEMO_AGX_HOME=$(mktemp -d "${TMPDIR:-/tmp}/agx-n8n-review.XXXXXX")
@@ -36,7 +36,7 @@ To copy the secret directly into the **Secret Key** field of n8n's credential di
 env AGX_HOME="$DEMO_AGX_HOME" agx identity export --profile n8n-demo --yes
 ```
 
-Configure the relay in the n8n credential separately. This provisioning sequence is documented, not executed as part of the current review; real n8n import/exchange and the PR build installation remain pending. Do not suggest installing the n8n package from npm until its release availability is verified. The lack of that optional integration never blocks the default local sample.
+Configure the relay in the n8n credential separately. The node package is published, but this credential-provisioning sequence and real n8n workflow import/exchange remain unverified here. The lack of that optional integration never blocks the default local sample.
 
 ## Requester steps — follow the selected assistant adapter
 
