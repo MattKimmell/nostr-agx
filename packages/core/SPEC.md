@@ -267,6 +267,43 @@ is not the question that terminates a loop.
 A task result (`res`) is terminal by construction and a receipt (rumor kind 3839) never elicits a
 reply, so neither carries `autoDepth`.
 
+## Evidence (optional)
+
+A message payload **MAY** carry `evidence`: records the sender read from its own system of record
+and quotes in support of the message text, so a receiver can show what a claim rests on rather than
+only the prose an agent wrote about it.
+
+```json
+"evidence": {
+  "v": 1,
+  "records": [{
+    "key": { "field": "roNumber", "value": "0057658556" },
+    "fields": { "status": "Repair In Process", "branch": "Eastside" },
+    "observedAt": "2026-10-20T14:03:11.000Z",
+    "source": "DMS"
+  }]
+}
+```
+
+- `v` is `1`. `records` holds 1 to 20 records.
+- `key` names the record: a field name and its value (string or number).
+- `fields` holds 1 to 12 fields, each a string, number, boolean or `null`.
+- `observedAt` is the ISO 8601 time the sender's tool returned the record.
+- `source` is an optional human label for the system of record.
+- Field names, `key.field` and `source` are at most 200 characters. String values are at most 500.
+
+Evidence is **sender-declared**. The signature proves who sent it, not that the records are true or
+current, so a receiver decides whether to trust it. For example, Ellaworks trusts it only when the
+sender is a team hosted on the same deployment, whose egress checked each record against the stored
+tool result before signing. Other receivers may show it as the sender's claim or ignore it.
+
+Evidence **never affects delivery**. A receiver that cannot read it (wrong version, a bound
+exceeded, a malformed time) **MUST** treat the whole `evidence` member as absent, never part of it,
+and **MUST** still deliver and receipt the message. A sender **SHOULD** refuse to send evidence that
+does not fit these bounds rather than send what the receiver will drop. Peers that predate this
+member strip it as an unknown key and deliver the message as before, so a sender cannot tell whether
+the receiver read it. Evidence counts toward the message size limit below.
+
 ## Message size (normative)
 
 The confidential transport imposes a plaintext byte ceiling. For the Nostr binding this is NOT

@@ -286,3 +286,41 @@ describe("isSignerUnavailable", () => {
 		expect(isSignerUnavailable("AgxSignerUnavailableError")).toBe(false);
 	});
 });
+
+describe("NostrTransport.poll forwards evidence", () => {
+	it("hands the host the evidence the sender signed, and none when it sent none", async () => {
+		const bob = await localSigner(bobSecret).getPublicKey();
+		const evidence = {
+			v: 1 as const,
+			records: [
+				{
+					key: { field: "roNumber", value: "0057658556" },
+					fields: { status: "Repair In Process" },
+					observedAt: "2026-10-20T14:03:11.000Z",
+				},
+			],
+		};
+		const withEvidence = await signMessageEvent({
+			signer: alice,
+			recipientPubkey: bob,
+			text: "status update",
+			evidence,
+			nowSec: NOW,
+		});
+		const { message: without } = await wrapsForBob();
+		pollInbox.mockResolvedValue({
+			events: [withEvidence.event, without.event],
+			complete: true,
+		});
+		const transport = await NostrTransport.create({
+			signer: localSigner(bobSecret),
+			relays: [],
+		});
+
+		const res = await transport.poll({ since: 0 });
+
+		const byId = new Map(res.messages.map((m) => [m.eventId, m]));
+		expect(byId.get(withEvidence.rumorId)?.evidence).toEqual(evidence);
+		expect(byId.get(without.rumorId)).not.toHaveProperty("evidence");
+	});
+});
