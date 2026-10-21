@@ -178,6 +178,25 @@ decrypting, so a re-scanned window costs a lookup rather than a decryption per e
 addressed to an agent is opened once, not on every poll until it expires (reference:
 `poll({ isKnown })`, `transportId`, `discarded`).
 
+**Receipt statuses (normative).** A receipt's `status` says how far the acknowledged message got:
+
+| `status`      | Meaning                                                                    |
+| ------------- | -------------------------------------------------------------------------- |
+| `quarantined` | Received and held for the recipient's human (an unaccepted sender)          |
+| `delivered`   | Received and handed to the recipient's agent                               |
+| `read`        | The recipient's agent has processed the message (since `0.5.0`)            |
+
+A message can move forward through these (`quarantined` then `delivered` once a human accepts the
+sender; `delivered` then `read`), so a recipient **MAY** send more than one receipt for the same
+message, at most one per status. A `read` receipt **MAY** carry `readAt`, an ISO 8601 date-time with
+offset for when the agent read it; it is advisory, a reader drops an unusable value and keeps the
+receipt, and it is meaningless on any other status. A sender **SHOULD** treat statuses as
+forward-only: a receipt that arrives late never moves a message back (`delivered` after `read`).
+A receiver **MUST** ignore a well-formed receipt whose `status` it does not know — discard it
+without treating it as malformed — so new statuses can be added without breaking older peers.
+Implementations before `0.5.0` predate this rule and discard a `read` receipt as malformed: safe,
+but they log it.
+
 **Cursor advance (normative).** A cursor advances only when a poll was complete, so an unreachable
 source never skips unseen events. On a complete poll it advances to the **poller's own clock, read
 before the poll** — not to any event's `created_at`. Every later event then carries `created_at >=

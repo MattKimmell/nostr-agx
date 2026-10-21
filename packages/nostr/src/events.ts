@@ -3,11 +3,13 @@ import {
 	buildReceiptPayload,
 	type ExchangeEvidence,
 	type ExchangePayload,
+	isUnknownStatusReceipt,
 	MAX_CONTENT_TYPE,
 	type ParsedExchangeMessage,
 	parseExchangePayload,
 	parseReceiptPayload,
 	type ReceiptPayload,
+	type ReceiptStatus,
 } from "@nostr-agx/core";
 import type { Event } from "nostr-tools";
 import {
@@ -360,7 +362,9 @@ export async function signReceiptEvent(params: {
 	/** The acknowledged message's RUMOR id. */
 	refEventId: string;
 	contextId: string;
-	status: "delivered" | "quarantined";
+	status: ReceiptStatus;
+	/** With `status: "read"`: when the recipient's agent read it (ISO 8601). */
+	readAt?: string;
 	nowSec: number;
 	powBits?: number;
 }): Promise<WrappedAgxEvent> {
@@ -368,6 +372,7 @@ export async function signReceiptEvent(params: {
 		refEventId: params.refEventId,
 		contextId: params.contextId,
 		status: params.status,
+		readAt: params.readAt,
 	});
 	const rumor = createRumor({
 		pubkey: await params.signer.getPublicKey(),
@@ -475,8 +480,9 @@ export function openMessageRumor(
 	return parsed ? { ...rumorMeta(unwrapped), ...parsed } : null;
 }
 
-/** Parse an already-unwrapped rumor as a receipt. Null on another kind or a
- * malformed payload. */
+/** Parse an already-unwrapped rumor as a receipt. Null on another kind, a
+ * malformed payload, or a status this build does not know (tell that last one
+ * apart with {@link isIgnorableReceiptRumor}). */
 export function openReceiptRumor(
 	unwrapped: UnwrappedRumor,
 ): OpenedReceipt | null {
@@ -487,6 +493,16 @@ export function openReceiptRumor(
 		parseRumorJson(unwrapped.rumor.content),
 	);
 	return receipt ? { ...rumorMeta(unwrapped), receipt } : null;
+}
+
+/** True for a receipt rumor that is well formed but carries a status this
+ * build does not know. Such a receipt is ignored, not counted as malformed:
+ * see "Receipts" in SPEC.md. */
+export function isIgnorableReceiptRumor(unwrapped: UnwrappedRumor): boolean {
+	return (
+		unwrapped.rumor.kind === RECEIPT_KIND &&
+		isUnknownStatusReceipt(parseRumorJson(unwrapped.rumor.content))
+	);
 }
 
 /** Unwrap + parse an inbound gift-wrapped message. The wrap's signature is

@@ -2,6 +2,7 @@ import type {
 	ExchangeEvidence,
 	ParsedExchangeMessage,
 	ReceiptPayload,
+	ReceiptStatus,
 } from "./wire";
 
 /**
@@ -91,13 +92,15 @@ export interface AgxTransport {
 	 * back to a conservative built-in byte cap when it is absent. */
 	canCarry?(text: string): boolean;
 
-	/** Publish a delivery-ack receipt back to a message's sender. */
+	/** Publish a delivery-ack receipt back to a message's sender. `readAt` is
+	 * carried only with `status: "read"`. */
 	publishReceipt(
 		to: string,
 		receipt: {
 			refEventId: string;
 			contextId: string;
-			status: "delivered" | "quarantined";
+			status: ReceiptStatus;
+			readAt?: string;
 		},
 	): Promise<{ ok: boolean }>;
 

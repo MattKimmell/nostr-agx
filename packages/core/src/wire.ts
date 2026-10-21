@@ -213,14 +213,33 @@ export const exchangePayloadSchema = z.object({
 });
 export type ExchangePayload = z.infer<typeof exchangePayloadSchema>;
 
-/** Receipt (delivery-ack) payload. */
-export const receiptPayloadSchema = z.object({
+/**
+ * What a receipt reports about the message it acknowledges, in the order a
+ * message moves through them: `quarantined` (held for the recipient's human),
+ * `delivered` (handed to the recipient's agent), `read` (the recipient's agent
+ * processed it). See "Receipts" in SPEC.md.
+ */
+export const RECEIPT_STATUSES = ["delivered", "quarantined", "read"] as const;
+export type ReceiptStatus = (typeof RECEIPT_STATUSES)[number];
+
+/** The receipt envelope with any status string — what a receipt from a newer
+ * peer looks like to this build. Bounded like every other field here. */
+const receiptEnvelopeSchema = z.object({
 	v: z.literal(1),
 	kind: z.literal("receipt"),
 	/** The transport id of the message being acknowledged. */
 	refEventId: z.string().min(1).max(200),
 	contextId: z.string().min(1).max(200),
-	status: z.enum(["delivered", "quarantined"]),
+	status: z.string().min(1).max(64),
+});
+
+/** Receipt (delivery-ack) payload. */
+export const receiptPayloadSchema = receiptEnvelopeSchema.extend({
+	status: z.enum(RECEIPT_STATUSES),
+	/** When the recipient's agent read the message (ISO 8601 with offset).
+	 * Meaningful only with `status: "read"`. Advisory, so `.catch(undefined)`:
+	 * an unusable value is dropped, never the receipt. */
+	readAt: z.iso.datetime({ offset: true }).optional().catch(undefined),
 });
 export type ReceiptPayload = z.infer<typeof receiptPayloadSchema>;
 
@@ -389,11 +408,13 @@ export function parseExchangePayload(
 	};
 }
 
-/** Build a Receipt (delivery-ack) payload. */
+/** Build a Receipt (delivery-ack) payload. `readAt` is carried only with
+ * `status: "read"`. */
 export function buildReceiptPayload(params: {
 	refEventId: string;
 	contextId: string;
-	status: "delivered" | "quarantined";
+	status: ReceiptStatus;
+	readAt?: string;
 }): ReceiptPayload {
 	return {
 		v: 1,
@@ -401,11 +422,30 @@ export function buildReceiptPayload(params: {
 		refEventId: params.refEventId,
 		contextId: params.contextId,
 		status: params.status,
+		...(params.status === "read" && params.readAt
+			? { readAt: params.readAt }
+			: {}),
 	};
 }
 
-/** Parse + validate a decrypted RECEIPT payload. Returns null when malformed. */
+/** Parse + validate a decrypted RECEIPT payload. Returns null when malformed,
+ * and for a well-formed receipt whose status this build does not know (see
+ * {@link isUnknownStatusReceipt}). */
 export function parseReceiptPayload(raw: unknown): ReceiptPayload | null {
 	const parsed = receiptPayloadSchema.safeParse(raw);
 	return parsed.success ? parsed.data : null;
+}
+
+/**
+ * True for a well-formed receipt carrying a status this build does not know —
+ * one a newer peer sent. Receivers ignore such a receipt (SPEC.md, "Receipts"):
+ * it is not malformed, and nothing about it needs a warning. Lets a future
+ * status ship without every older peer logging it as junk.
+ */
+export function isUnknownStatusReceipt(raw: unknown): boolean {
+	const envelope = receiptEnvelopeSchema.safeParse(raw);
+	return (
+		envelope.success &&
+		!(RECEIPT_STATUSES as readonly string[]).includes(envelope.data.status)
+	);
 }

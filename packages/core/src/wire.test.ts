@@ -12,6 +12,7 @@ import {
 	MAX_EVIDENCE_VALUE,
 	MAX_INBOUND_BODY,
 	MAX_SUBJECT,
+	isUnknownStatusReceipt,
 	parseExchangePayload,
 	parseReceiptPayload,
 	registerContentType,
@@ -505,5 +506,81 @@ describe("receipt payload", () => {
 				status: "exploded",
 			}),
 		).toBeNull();
+	});
+
+	it("round-trips a read receipt with when it was read", () => {
+		const r = buildReceiptPayload({
+			refEventId: "e1",
+			contextId: "c1",
+			status: "read",
+			readAt: "2026-10-20T15:36:12.000Z",
+		});
+		expect(r.readAt).toBe("2026-10-20T15:36:12.000Z");
+		expect(parseReceiptPayload(r)).toEqual(r);
+	});
+
+	it("carries readAt only on a read receipt", () => {
+		const r = buildReceiptPayload({
+			refEventId: "e1",
+			contextId: "c1",
+			status: "delivered",
+			readAt: "2026-10-20T15:36:12.000Z",
+		});
+		expect("readAt" in r).toBe(false);
+	});
+
+	it("still parses a receipt shaped by 0.4.0 (no readAt)", () => {
+		const r = parseReceiptPayload({
+			v: 1,
+			kind: "receipt",
+			refEventId: "e1",
+			contextId: "c1",
+			status: "quarantined",
+		});
+		expect(r).toEqual({
+			v: 1,
+			kind: "receipt",
+			refEventId: "e1",
+			contextId: "c1",
+			status: "quarantined",
+		});
+	});
+
+	it("drops an unusable readAt, never the receipt", () => {
+		const r = parseReceiptPayload({
+			v: 1,
+			kind: "receipt",
+			refEventId: "e1",
+			contextId: "c1",
+			status: "read",
+			readAt: "yesterday",
+		});
+		expect(r?.status).toBe("read");
+		expect(r?.readAt).toBeUndefined();
+	});
+});
+
+describe("isUnknownStatusReceipt", () => {
+	const envelope = { v: 1, kind: "receipt", refEventId: "e", contextId: "c" };
+
+	it("is true for a well-formed receipt with a status this build does not know", () => {
+		expect(isUnknownStatusReceipt({ ...envelope, status: "replied" })).toBe(
+			true,
+		);
+	});
+
+	it("is false for every status this build knows", () => {
+		for (const status of ["delivered", "quarantined", "read"]) {
+			expect(isUnknownStatusReceipt({ ...envelope, status })).toBe(false);
+		}
+	});
+
+	it("is false for a malformed receipt, which stays malformed", () => {
+		expect(isUnknownStatusReceipt({ v: 1, kind: "receipt" })).toBe(false);
+		expect(
+			isUnknownStatusReceipt({ ...envelope, refEventId: "", status: "x" }),
+		).toBe(false);
+		expect(isUnknownStatusReceipt({ ...envelope, status: "" })).toBe(false);
+		expect(isUnknownStatusReceipt("not an object")).toBe(false);
 	});
 });
